@@ -91,6 +91,11 @@ struct Player {
         SDL_DestroyTexture(tex);
     }
 
+    void refresh_texture(SDL_Renderer* rend, SDL_Surface* surface) {
+        SDL_DestroyTexture(tex);
+        tex = SDL_CreateTextureFromSurface(rend, surface);
+    }
+
     SDL_RendererFlip sdl_flip() {
         return flipped ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
     }
@@ -363,6 +368,7 @@ int main() {
     int window_width = 720, window_height = 512;
     SDL_Renderer* renderer;
     SDL_Surface* player_surface;
+    SDL_Surface* dummy_surface;
     SDL_Surface* temp_surface;
     Textures tex;
     Musics music;
@@ -390,6 +396,7 @@ int main() {
 
     // =================== Load Some Assets ===================
     player_surface = IMG_Load("assets/player/player.png");
+    dummy_surface  = IMG_Load("assets/player/player.png");
 
     temp_surface = IMG_Load("assets/sky.png");
     tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
@@ -436,6 +443,10 @@ int main() {
 
     // ====================== Initialize Things That Do Stuff ======================
     Player player(renderer, player_surface, &tex, &sfx, 0);
+    // 0xFFAD8469
+    Player enemy(renderer, dummy_surface, &tex, &sfx, 0xFF6984AD);
+    enemy.cell_x = 6;
+    enemy.flipped = true;
     for (int i = 0; i < NUM_CLOUDS; i++)
         clouds[i].initialize(window_width, window_height, tex.cloud);
 
@@ -534,6 +545,7 @@ int main() {
         SDL_RenderCopy(renderer, tex.platform, NULL, NULL);
 
         player.render(renderer);
+        enemy.render(renderer);
 
         for (int i = NUM_CLOUDS / 2; i < NUM_CLOUDS; i++)
             clouds[i].render(renderer);
