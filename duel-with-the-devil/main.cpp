@@ -64,7 +64,7 @@ struct Player {
         tex        = SDL_CreateTextureFromSurface(rend, surface);
         sword_tex  = textures->sword;
         swoosh_tex = textures->swoosh;
-        frame      = 0;
+        frame      = 2;
         current_action  = NONE;
         previous_action = NONE;
         next_action     = UNSPECIFIED;
@@ -85,22 +85,50 @@ struct Player {
         return flipped ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
     }
 
-    void animate() {
+    void assign_frame() {
         frame_counter += 1;
         switch (current_action) {
         case NONE:
+            if (frame < 2 || frame > 4) frame = 1;
             if (frame_counter % 25 == 0) {
                 frame += 1;
-                if (frame > 2) frame = 0;
+                if (frame > 4) frame = 2;
             }
             break;
 
-        default: break;
+        case GO_UP:
+            if (cell_y == ground_level)
+                frame = 1;
+            else
+                if (frame_counter > 3) frame = 6;
+                else frame = 5;
+
+            break;
+
+        case GO_DOWN:
+            if (cell_y == ground_level && prev_cell_y < ground_level)
+                frame = 2;
+            else
+                frame = 1;
+            break;
+
+        case GO_LEFT: case GO_RIGHT:
+            if (previous_action == GO_UP)
+                frame = 0;
+            else
+                frame = 2;
+            break;
+
+        default:
+            frame = 2;
+            if (cell_y == ground_level && prev_cell_y < ground_level)
+                frame = 1;
+            break;
         }
     }
 
     void update() {
-        animate();
+        assign_frame();
 
         if (action_timeout > 0) {
             action_timeout -= 1;
@@ -152,7 +180,8 @@ struct Player {
 
                 case GO_LEFT:
                     cell_x -= 1;
-                    flipped = true;
+                    if (previous_action != GO_DOWN)
+                        flipped = true;
                     if (cell_y < ground_level)
                         cell_y = ground_level;
                     if (cell_x < 1)
@@ -161,7 +190,8 @@ struct Player {
 
                 case GO_RIGHT:
                     cell_x += 1;
-                    flipped = false;
+                    if (previous_action != GO_DOWN)
+                        flipped = false;
                     if (cell_y < ground_level)
                         cell_y = ground_level;
                     if (cell_x > 5)
@@ -185,8 +215,10 @@ struct Player {
             (45 * scale), (45 * scale)
         };
 
+        // =========================== Special Effects For Moving Left/Right ======================
         if (current_action == GO_RIGHT || current_action == GO_LEFT) {
-            SDL_Rect fsrc = { 0, 0, 45, 45 };
+            // Shadow frame 2 -----v
+            SDL_Rect fsrc = { 45 * 2, 0, 45, 45 };
             SDL_Rect fdest = {
                 (prev_cell_x * 45 * scale), ((17 + prev_cell_y * 45) * scale),
                 (45 * scale), (45 * scale)
@@ -201,12 +233,53 @@ struct Player {
             SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
             SDL_SetTextureAlphaMod(tex, 255);
 
+            // Sword swoosh!
+            if (previous_action == GO_UP) {
+                int swoosh_frame = 0 + (frame_counter / 2);
+                if (swoosh_frame < 4) {
+                    fsrc.x = swoosh_frame * 45;
+                    if (current_action == GO_RIGHT) fdest.x += 50 * scale;
+                    if (current_action == GO_LEFT)  fdest.x -= 50 * scale;
+                    fdest.y += 40 * scale;
+                    SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+                }
+            }
+            else {
+                // Swoosh frame:
+                int swoosh_frame = 7 + (frame_counter / 2);
+                if (swoosh_frame < 10) {
+                    fsrc.x = swoosh_frame * 45;
+                    // Shift further forwards for swoosh.
+                    if (current_action == GO_RIGHT) fdest.x += 20 * scale;
+                    if (current_action == GO_LEFT)  fdest.x -= 20 * scale;
+                    SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+                }
+            }
+        }
+        // =========================== Special Effects For Jumping ============================
+        else if (current_action == GO_UP && previous_action != GO_UP) {
+            // Shadow frame 6 -----v
+            SDL_Rect fsrc = { 45 * 6, 0, 45, 45 };
+            SDL_Rect fdest = {
+                (prev_cell_x * 45 * scale), ((17 + prev_cell_y * 45) * scale),
+                (45 * scale), (45 * scale)
+            };
+
+            SDL_Rect shadowdest = fdest;
+            shadowdest.y -= (10 + frame_counter) * scale;
+
+            SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 9);
+            SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
+            SDL_SetTextureAlphaMod(tex, 255);
+
             // Swoosh frame:
-            fsrc.x += (frame_counter / 2) * 45;
-            // Shift further forwards for swoosh.
-            if (current_action == GO_RIGHT) fdest.x += 20 * scale;
-            if (current_action == GO_LEFT)  fdest.x -= 20 * scale;
-            SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+            int swoosh_frame = 4 + (frame_counter / 2);
+            if (swoosh_frame < 6) {
+                fsrc.x = swoosh_frame * 45;
+                // Shift further upwards for swoosh.
+                fdest.y -= 10 * scale;
+                SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+            }
         }
 
         SDL_RenderCopyEx(renderer, tex, &src, &dest, 0, 0, sdl_flip());
@@ -394,9 +467,9 @@ int main() {
         }
 
         if      (controls[RIGHT] && !moved_from[RIGHT]) player.next_action = GO_RIGHT;
-        else if (controls[LEFT] && !moved_from[LEFT])  player.next_action = GO_LEFT;
-        else if (controls[UP] && !moved_from[UP])    player.next_action = GO_UP;
-        else if (controls[DOWN] && !moved_from[DOWN])  player.next_action = GO_DOWN;
+        else if (controls[LEFT]  && !moved_from[LEFT])  player.next_action = GO_LEFT;
+        else if (controls[UP]    && !moved_from[UP])    player.next_action = GO_UP;
+        else if (controls[DOWN]  && !moved_from[DOWN])  player.next_action = GO_DOWN;
         else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
 
         // ========================== Game Logic =====================
