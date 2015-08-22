@@ -210,3 +210,8 @@ FakesAssemblies/
 GeneratedArtifacts/
 _Pvt_Extensions/
 ModelManifest.xml
+
+*.dll
+*.swp
+*folder-icon.ico
+**/Desktop.ini
