@@ -344,7 +344,8 @@ int main() {
     Actions reserve_action = UNSPECIFIED;
     bool keys_pressed_since_move[4];
     memset(keys_pressed_since_move, 0, sizeof(keys));
-    // int frames_before_reserve = 4;
+    // Unfortunately, this control idea is tricky if we don't want the player to move twice
+    // every time you press a button once...
     bool moved_from[4];
     memset(moved_from, 0, sizeof(moved_from));
     bool player_just_moved = false;
@@ -359,6 +360,7 @@ int main() {
             }
         }
 
+        // ====================== Input Processing / Control Logic ========================
         controls[UP]    = keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W];
         controls[DOWN]  = keys[SDL_SCANCODE_DOWN]  || keys[SDL_SCANCODE_S];
         controls[LEFT]  = keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A];
@@ -369,7 +371,6 @@ int main() {
         if (moved_from[LEFT] && !controls[LEFT]) controls[LEFT] = false;
         if (moved_from[RIGHT] && !controls[RIGHT]) controls[RIGHT] = false;
 
-        // ================= Game Logic ===================
         if (player.moved && player.frame_counter > 0) {
             if (keys_pressed_since_move[RIGHT]) {
                 if (keyreleased(RIGHT)) reserve_action = GO_RIGHT;
@@ -398,8 +399,10 @@ int main() {
         else if (controls[DOWN] && !moved_from[DOWN])  player.next_action = GO_DOWN;
         else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
 
+        // ========================== Game Logic =====================
         player.update();
 
+        // ====================== Postmortem Control Logic ==============
         if (player.moved) {
             if (player.frame_counter == 0) {
                 player_just_moved = true;
