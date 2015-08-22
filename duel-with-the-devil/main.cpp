@@ -54,6 +54,7 @@ struct Player {
     // Cooldown between actions.
     int action_timeout;
     bool flipped;
+    bool moved;
 
     // The cell_y value of the ground.
     const int ground_level = 2;
@@ -73,6 +74,7 @@ struct Player {
         prev_cell_x = 1;
         prev_cell_y = ground_level;
         flipped = false;
+        moved = false;
     }
 
     ~Player() {
@@ -103,7 +105,7 @@ struct Player {
         if (action_timeout > 0) {
             action_timeout -= 1;
             if (action_timeout == 0) {
-                // previous_action = current_action;
+                moved = false;
                 if (next_action == UNSPECIFIED)
                     next_action = NONE;
             }
@@ -113,8 +115,11 @@ struct Player {
                 previous_action = current_action;
                 current_action  = next_action;
                 next_action     = UNSPECIFIED;
-                if (current_action != NONE) action_timeout  = 18;
                 frame_counter   = 0;
+                if (current_action != NONE) {
+                    action_timeout = 18;
+                    moved = true;
+                }
 
                 prev_cell_x = cell_x;
                 prev_cell_y = cell_y;
@@ -187,16 +192,20 @@ struct Player {
                 (45 * scale), (45 * scale)
             };
 
-            if (current_action == GO_RIGHT) fdest.x += 10;
-            if (current_action == GO_LEFT)  fdest.x -= 10;
+            // Shift shadow image forwards a bit so that it doesn't looks like we're teleporting.
+            SDL_Rect shadowdest = fdest;
+            if (current_action == GO_RIGHT) shadowdest.x += (10 + frame_counter) * scale;
+            if (current_action == GO_LEFT)  shadowdest.x -= (10 + frame_counter) * scale;
 
-            SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 2);
-            SDL_RenderCopyEx(renderer, tex, &fsrc, &fdest, 0, 0, sdl_flip());
+            SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 9);
+            SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
             SDL_SetTextureAlphaMod(tex, 255);
 
-            fsrc.x += (frame_counter / 7 - 1) * 45;
-            if (current_action == GO_RIGHT) fdest.x += 20;
-            if (current_action == GO_LEFT)  fdest.x -= 20;
+            // Swoosh frame:
+            fsrc.x += (frame_counter / 2) * 45;
+            // Shift further forwards for swoosh.
+            if (current_action == GO_RIGHT) fdest.x += 20 * scale;
+            if (current_action == GO_LEFT)  fdest.x -= 20 * scale;
             SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
         }
 
@@ -242,8 +251,13 @@ struct Cloud {
     }
 };
 
-#define keypressed(ctl) (controls[ctl] && !last_controls[ctl])
-const int NUM_CLOUDS = 15;
+#define keyreleased(ctl) (controls[ctl] && !last_controls[ctl])
+#define keypressed(ctl) (!controls[ctl] && last_controls[ctl])
+#define NUM_CLOUDS 15
+
+bool any(bool controls[4]) {
+    return controls[0] || controls[1] || controls[2] || controls[3];
+}
 
 #ifdef _WIN32
 int WinMain(HINSTANCE hinst, HINSTANCE prev, LPSTR cmdline, int cmdshow) {
@@ -261,6 +275,7 @@ int main() {
     bool last_controls[4];
     bool controls[4];
     Cloud clouds[NUM_CLOUDS];
+    AnyPopup();
 
     // ================== Initialize things ====================
     if (!SDL_Init(SDL_INIT_AUDIO) == -1) { exit(1); }
@@ -293,6 +308,7 @@ int main() {
     SDL_SetTextureAlphaMod(tex.swoosh, 155);
     SDL_FreeSurface(temp_surface);
 
+    // TODO this isn't used yet... Will it ever be?
     temp_surface = IMG_Load("assets/ui/gridcell.png");
     tex.grid_cell = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
@@ -313,7 +329,7 @@ int main() {
     else
         Mix_PlayMusic(music.ominous, -1);
 
-    // ====================== Initialize Player And Scenery ======================
+    // ====================== Initialize Things That Do Stuff ======================
     Player player(renderer, player_surface, &tex, 0);
     for (int i = 0; i < NUM_CLOUDS; i++)
         clouds[i].initialize(window_width, window_height, tex.cloud);
@@ -323,6 +339,15 @@ int main() {
     Uint64 milliseconds_per_tick = 1000 / SDL_GetPerformanceFrequency();
     int key_count;
     const Uint8* keys = SDL_GetKeyboardState(&key_count);
+    // If we press and release a key while player is still cooling down from movement, we
+    // want to use that key.
+    Actions reserve_action = UNSPECIFIED;
+    bool keys_pressed_since_move[4];
+    memset(keys_pressed_since_move, 0, sizeof(keys));
+    // int frames_before_reserve = 4;
+    bool moved_from[4];
+    memset(moved_from, 0, sizeof(moved_from));
+    bool player_just_moved = false;
 
     while (true) {
         // ============= Frame Setup =================
@@ -339,14 +364,57 @@ int main() {
         controls[LEFT]  = keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A];
         controls[RIGHT] = keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D];
 
+        if (moved_from[UP] && !controls[UP]) moved_from[UP] = false;
+        if (moved_from[DOWN] && !controls[DOWN]) controls[DOWN] = false;
+        if (moved_from[LEFT] && !controls[LEFT]) controls[LEFT] = false;
+        if (moved_from[RIGHT] && !controls[RIGHT]) controls[RIGHT] = false;
+
         // ================= Game Logic ===================
-        if      (controls[RIGHT]) player.next_action = GO_RIGHT;
-        else if (controls[LEFT])  player.next_action = GO_LEFT;
-        else if (controls[UP])    player.next_action = GO_UP;
-        else if (controls[DOWN])  player.next_action = GO_DOWN;
-        else player.next_action = UNSPECIFIED;
+        if (player.moved && player.frame_counter > 0) {
+            if (keys_pressed_since_move[RIGHT]) {
+                if (keyreleased(RIGHT)) reserve_action = GO_RIGHT;
+            }
+            else keys_pressed_since_move[RIGHT] = keypressed(RIGHT);
+
+            if (keys_pressed_since_move[LEFT]) {
+                if (keyreleased(LEFT)) reserve_action = GO_LEFT;
+            }
+            else keys_pressed_since_move[LEFT] = keypressed(LEFT);
+
+            if (keys_pressed_since_move[UP]) {
+                if (keyreleased(UP)) reserve_action = GO_UP;
+            }
+            else keys_pressed_since_move[UP] = keypressed(UP);
+
+            if (keys_pressed_since_move[DOWN]) {
+                if (keyreleased(DOWN)) reserve_action = GO_DOWN;
+            }
+            else keys_pressed_since_move[DOWN] = keypressed(DOWN);
+        }
+
+        if      (controls[RIGHT] && !moved_from[RIGHT]) player.next_action = GO_RIGHT;
+        else if (controls[LEFT] && !moved_from[LEFT])  player.next_action = GO_LEFT;
+        else if (controls[UP] && !moved_from[UP])    player.next_action = GO_UP;
+        else if (controls[DOWN] && !moved_from[DOWN])  player.next_action = GO_DOWN;
+        else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
 
         player.update();
+
+        if (player.moved) {
+            if (player.frame_counter == 0) {
+                player_just_moved = true;
+                memset(moved_from, 0, sizeof(moved_from));
+                int key_from_action = player.current_action - 1;
+                if (key_from_action >= 0 && key_from_action < sizeof(keys))
+                    moved_from[key_from_action] = true;
+
+                reserve_action = UNSPECIFIED;
+                memset(keys_pressed_since_move, 0, sizeof(keys_pressed_since_move));
+            }
+        }
+        else if (player_just_moved) {
+            memset(moved_from, 0, sizeof(moved_from));
+        }
 
         // ====================== Render ========================
         SDL_RenderClear(renderer);
