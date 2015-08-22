@@ -31,7 +31,6 @@ struct Textures {
     SDL_Texture* platform;
     SDL_Texture* sword;
     SDL_Texture* horns;
-    SDL_Texture* swoosh;
     SDL_Texture* grid_cell;
     SDL_Texture* cloud;
 };
@@ -46,6 +45,8 @@ struct Sounds {
     Mix_Chunk* jump;
     Mix_Chunk* swipe;
     Mix_Chunk* crouch;
+    Mix_Chunk* clash1;
+    Mix_Chunk* clash2;
 };
 
 enum Controls { UP, DOWN, LEFT, RIGHT };
@@ -53,9 +54,9 @@ enum Actions { UNSPECIFIED, GO_UP, GO_DOWN, GO_LEFT, GO_RIGHT, NONE };
 
 struct Player {
     SDL_Texture* tex;
+    SDL_Texture* swoosh_tex;
     SDL_Texture* sword_tex;
     SDL_Texture* horns_tex;
-    SDL_Texture* swoosh_tex;
     Sounds* sfx;
     int cell_x, cell_y, prev_cell_x, prev_cell_y;
     // This increments each frame, and is set to 0 when an action is used.
@@ -74,12 +75,17 @@ struct Player {
     // The cell_y value of the ground.
     const int ground_level = 2;
 
-    Player(SDL_Renderer* rend, SDL_Surface* surface, Textures* textures, Sounds* sounds, Uint32 color) {
-        if (color != 0) ChangeColorTo(surface, color);
+    Player(SDL_Renderer* rend, SDL_Surface* surface, SDL_Surface* swoosh_surf, Textures* textures, Sounds* sounds, Uint32 color) {
+        if (color != 0) {
+            ChangeColorTo(surface, color);
+            ChangeColorTo(swoosh_surf, color);
+        }
         tex        = SDL_CreateTextureFromSurface(rend, surface);
+        swoosh_tex = SDL_CreateTextureFromSurface(rend, swoosh_surf);
+        SDL_SetTextureAlphaMod(tex, 155);
+        SDL_SetTextureAlphaMod(swoosh_tex, 155);
         sword_tex  = textures->sword;
         horns_tex  = textures->horns;
-        swoosh_tex = textures->swoosh;
         sfx        = sounds;
         frame      = 2;
         current_action  = NONE;
@@ -153,7 +159,7 @@ struct Player {
     }
 
     void update() {
-        if (falling) { frame_counter += 1; return; }
+        if (falling || dead) { frame_counter += 1; return; }
         assign_frame();
 
         if (action_timeout > 0) {
@@ -189,7 +195,7 @@ struct Player {
                 case GO_UP:
                     if (cell_y == ground_level) {
                         cell_y -= 1;
-                        Mix_PlayChannel(-1, sfx->jump, 0);
+                        Mix_PlayChannel(2, sfx->jump, 0);
                     }
                     else {
                         OutputDebugString("Flopped\n");
@@ -198,7 +204,7 @@ struct Player {
                     break;
 
                 case GO_DOWN:
-                    Mix_PlayChannel(-1, sfx->crouch, 0);
+                    Mix_PlayChannel(3, sfx->crouch, 0);
                     if (cell_y == ground_level)
                         OutputDebugString("Crouch!!\n");
                     else {
@@ -212,11 +218,11 @@ struct Player {
                     if (previous_action != GO_DOWN)
                         flipped = true;
                     if (cell_y < ground_level) {
-                        Mix_PlayChannel(-1, sfx->swipe, 0);
+                        Mix_PlayChannel(4, sfx->swipe, 0);
                         cell_y = ground_level;
                     }
                     else
-                        Mix_PlayChannel(-1, sfx->move, 0);
+                        Mix_PlayChannel(1, sfx->move, 0);
                     if (cell_x < 1)
                         OutputDebugString("Falling!!!!\n");
                     break;
@@ -227,10 +233,10 @@ struct Player {
                         flipped = false;
                     if (cell_y < ground_level) {
                         cell_y = ground_level;
-                        Mix_PlayChannel(-1, sfx->swipe, 0);
+                        Mix_PlayChannel(4, sfx->swipe, 0);
                     }
                     else
-                        Mix_PlayChannel(-1, sfx->move, 0);
+                        Mix_PlayChannel(1, sfx->move, 0);
                     if (cell_x > 5)
                         OutputDebugString("Falling!!!!\n");
                     break;
@@ -273,6 +279,9 @@ struct Player {
                 dest.h -= (frame_counter - 60) / 2;
             }
         }
+        else if (dead) {
+            // TODO death?
+        }
         else {
             // =========================== Special Effects For Moving Left/Right ======================
             if (current_action == GO_RIGHT || current_action == GO_LEFT) {
@@ -312,7 +321,8 @@ struct Player {
                         // Shift further forwards for swoosh.
                         if (current_action == GO_RIGHT) fdest.x += 20 * scale;
                         if (current_action == GO_LEFT)  fdest.x -= 20 * scale;
-                        SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+                        SDL_RendererFlip flip = (SDL_RendererFlip)(previous_action == GO_DOWN ? sdl_flip() - 1 : sdl_flip());
+                        SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, flip);
                     }
                 }
             }
@@ -386,6 +396,106 @@ struct Cloud {
     }
 };
 
+// ======================================= Player Collision ======================================
+enum CollisionResult { NO_COLLISION = 0, CLASH, KILL };
+
+// Here we cover all possibilities where p1 and p2 BOTH move into the same spot.
+CollisionResult walk_into_eachother(Player* p1, Player* p2, Actions _right, Actions _left, int mod, Player** loser) {
+    if (!(p1->cell_x == p2->cell_x && p1->cell_y == p2->cell_y)) return NO_COLLISION;
+
+    if (p1->current_action == _right && p2->current_action == _left) {
+        if (p2->previous_action == GO_UP && !(p1->previous_action == GO_UP || p1->previous_action == GO_DOWN)) {
+            *loser = p1;
+            return KILL;
+        }
+        else if (p1->previous_action == GO_UP && !(p2->previous_action == GO_UP || p2->previous_action == GO_DOWN)) {
+            *loser = p2;
+            return KILL;
+        }
+        else if (p1->previous_action == GO_UP && p2->previous_action == GO_UP) {
+            p1->cell_x -= 1 * mod;
+            p2->cell_x += 1 * mod;
+            return CLASH;
+        }
+        else if (p1->previous_action == GO_DOWN && !p2->previous_action == GO_DOWN) {
+            p2->cell_x += 1 * mod;
+            return CLASH;
+        }
+        else if (p2->previous_action == GO_DOWN && !p1->previous_action == GO_DOWN) {
+            p1->cell_x -= 1 * mod;
+            return CLASH;
+        }
+        else if (p2->previous_action == GO_DOWN && p1->previous_action == GO_DOWN) {
+            p1->cell_x -= 1 * mod;
+            p2->cell_x += 1 * mod;
+            return CLASH;
+        }
+        else if (p2->previous_action == _left && p1->previous_action != _right) {
+            p1->cell_x -= 1 * mod;
+            return CLASH;
+        }
+        else if (p1->previous_action == _right && p2->previous_action != _left) {
+            p2->cell_x += 1 * mod;
+            return CLASH;
+        }
+        else {
+            p1->cell_x -= 1 * mod;
+            p2->cell_x += 1 * mod;
+            return CLASH;
+        }
+    }
+
+    return NO_COLLISION;
+}
+
+void collide_players(Player* p1, Player* p2, Sounds* sfx) {
+    Player* loser = NULL;
+
+    CollisionResult walked = walk_into_eachother(p1, p2, GO_RIGHT, GO_LEFT, 1, &loser);
+    if (!walked) walked =  walk_into_eachother(p1, p2, GO_LEFT, GO_RIGHT, -1, &loser);
+
+    if (walked == CLASH) {
+        Mix_Chunk* clash;
+        if (rand() % 10 > 5) clash = sfx->clash1;
+        else clash = sfx->clash2;
+        Mix_PlayChannel(5, clash, 0);
+    }
+    else if (walked == KILL) {
+        loser->dead = true;
+    }
+}
+
+void dummy_ai(Player* player, Player* other_player, void* rawdata) {
+    struct DummyAi {
+        Uint8 initialized;
+        bool go_right;
+        int timer;
+    };
+    DummyAi* data = (DummyAi*) rawdata;
+    if (!player->moved) {
+        if (data->timer > 0) {
+            data->timer -= 1;
+        }
+        else {
+            if (data->go_right) {
+                if (player->cell_x >= 6) {
+                    data->go_right = false;
+                    player->next_action = GO_LEFT;
+                }
+                else player->next_action = GO_RIGHT;
+            }
+            else {
+                if (player->cell_x <= 1) {
+                    data->go_right = true;
+                    player->next_action = GO_RIGHT;
+                }
+                else player->next_action = GO_LEFT;
+            }
+            data->timer = 20;
+        }
+    }
+}
+
 #define keyreleased(ctl) (controls[ctl] && !last_controls[ctl])
 #define keypressed(ctl) (!controls[ctl] && last_controls[ctl])
 #define NUM_CLOUDS 15
@@ -404,7 +514,9 @@ int main() {
     int window_width = 720, window_height = 512;
     SDL_Renderer* renderer;
     SDL_Surface* player_surface;
+    SDL_Surface* player_swoosh;
     SDL_Surface* dummy_surface;
+    SDL_Surface* dummy_swoosh;
     SDL_Surface* temp_surface;
     Textures tex;
     Musics music;
@@ -412,7 +524,8 @@ int main() {
     bool last_controls[4];
     bool controls[4];
     Cloud clouds[NUM_CLOUDS];
-    AnyPopup();
+    void(*ai_function)(Player*, Player*, void*) = dummy_ai;
+    void* ai_data = calloc(1024, 1);
 
     // ================== Initialize things ====================
     if (!SDL_Init(SDL_INIT_AUDIO) == -1) { exit(1); }
@@ -450,10 +563,8 @@ int main() {
     tex.horns = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
-    temp_surface = IMG_Load("assets/player/swoosh.png");
-    tex.swoosh = SDL_CreateTextureFromSurface(renderer, temp_surface);
-    SDL_SetTextureAlphaMod(tex.swoosh, 155);
-    SDL_FreeSurface(temp_surface);
+    player_swoosh = IMG_Load("assets/player/swoosh.png");
+    dummy_swoosh  = IMG_Load("assets/player/swoosh.png");
 
     // TODO this isn't used yet... Will it ever be?
     temp_surface = IMG_Load("assets/ui/gridcell.png");
@@ -475,12 +586,15 @@ int main() {
     sfx.jump   = Mix_LoadWAV("assets/sfx/jump.wav");
     sfx.swipe  = Mix_LoadWAV("assets/sfx/swipe.wav");
     sfx.crouch = Mix_LoadWAV("assets/sfx/crouch.wav");
+    sfx.clash1 = Mix_LoadWAV("assets/sfx/clash1.wav");
+    sfx.clash2 = Mix_LoadWAV("assets/sfx/clash2.wav");
 
     // ====================== Initialize Things That Do Stuff ======================
-    Player player(renderer, player_surface, &tex, &sfx, 0);
-    Player enemy(renderer, dummy_surface, &tex, &sfx, 0xFF6984AD);
+    Player player(renderer, player_surface, player_swoosh, &tex, &sfx, 0);
+    Player enemy(renderer, dummy_surface, dummy_swoosh, &tex, &sfx, 0xFF6984AD);
     enemy.cell_x = 6;
     enemy.flipped = true;
+
     for (int i = 0; i < NUM_CLOUDS; i++)
         clouds[i].initialize(window_width, window_height, tex.cloud);
 
@@ -501,6 +615,7 @@ int main() {
     bool player_just_moved = false;
 
     bool player_was_dead = false;
+    bool enemy_was_dead = false;
 
     while (true) {
         // ============= Frame Setup =================
@@ -552,10 +667,16 @@ int main() {
         else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
 
         // ========================== Game Logic =====================
+        ai_function(&enemy, &player, ai_data);
         player.update();
+        enemy.update();
+        collide_players(&player, &enemy, &sfx);
         if (player.dead && !player_was_dead) {
             Mix_PlayMusic(music.death, 0);
             player_was_dead = true;
+        }
+        if (enemy.dead && !enemy_was_dead) {
+            OutputDebugString("OMG U KILL THEM\n");
         }
 
         // ====================== Postmortem Control Logic ==============
