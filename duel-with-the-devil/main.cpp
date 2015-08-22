@@ -37,7 +37,7 @@ struct Musics {
 
 enum Controls { UP, DOWN, LEFT, RIGHT };
 
-enum Actions { UP, DOWN, LEFT, RIGHT, NONE };
+enum Actions { GO_UP, GO_DOWN, GO_LEFT, GO_RIGHT, NONE };
 
 struct Player {
     SDL_Texture* tex;
