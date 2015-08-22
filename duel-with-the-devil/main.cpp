@@ -28,7 +28,9 @@ void ChangeColorTo(SDL_Surface* surface, Uint32 color) {
 
 struct Textures {
     SDL_Texture* background;
-    SDL_Texture* sword_tex;
+    SDL_Texture* sword;
+    SDL_Texture* swoosh;
+    SDL_Texture* grid_cell;
 };
 
 struct Musics {
@@ -36,44 +38,173 @@ struct Musics {
 };
 
 enum Controls { UP, DOWN, LEFT, RIGHT };
-
-enum Actions { GO_UP, GO_DOWN, GO_LEFT, GO_RIGHT, NONE };
+enum Actions { UNSPECIFIED, GO_UP, GO_DOWN, GO_LEFT, GO_RIGHT, NONE };
 
 struct Player {
     SDL_Texture* tex;
-    int cell_x, cell_y;
+    SDL_Texture* sword_tex;
+    SDL_Texture* swoosh_tex;
+    int cell_x, cell_y, prev_cell_x, prev_cell_y;
+    // This increments each frame, and is set to 0 when an action is used.
+    unsigned int frame_counter;
+    // The animation frame of the player.
     int frame;
+    Actions current_action, previous_action, next_action;
+    // Cooldown between actions.
+    int action_timeout;
+    bool flipped;
 
+    // The cell_y value of the ground.
     const int ground_level = 2;
 
-    Player(SDL_Renderer* rend, SDL_Surface* surface, Uint32 color) {
+    Player(SDL_Renderer* rend, SDL_Surface* surface, Textures* textures, Uint32 color) {
         if (color != 0) ChangeColorTo(surface, color);
-        tex = SDL_CreateTextureFromSurface(rend, surface);
-        frame = 0;
+        tex        = SDL_CreateTextureFromSurface(rend, surface);
+        sword_tex  = textures->sword;
+        swoosh_tex = textures->swoosh;
+        frame      = 0;
+        current_action  = NONE;
+        previous_action = NONE;
+        next_action     = UNSPECIFIED;
+        action_timeout = 0;
+        cell_x = 1;
+        cell_y = ground_level;
+        prev_cell_x = 1;
+        prev_cell_y = ground_level;
+        flipped = false;
     }
 
     ~Player() {
         SDL_DestroyTexture(tex);
     }
 
+    SDL_RendererFlip sdl_flip() {
+        return flipped ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
+    }
+
+    void animate() {
+        frame_counter += 1;
+        switch (current_action) {
+        case NONE:
+            if (frame_counter % 25 == 0) {
+                frame += 1;
+                if (frame > 2) frame = 0;
+            }
+            break;
+
+        default: break;
+        }
+    }
+
+    void update() {
+        animate();
+
+        if (action_timeout > 0) {
+            action_timeout -= 1;
+            if (action_timeout == 0) {
+                // previous_action = current_action;
+                if (next_action == UNSPECIFIED)
+                    next_action = NONE;
+            }
+        }
+        if (action_timeout <= 0) {
+            if (next_action != UNSPECIFIED) {
+                previous_action = current_action;
+                current_action  = next_action;
+                next_action     = UNSPECIFIED;
+                if (current_action != NONE) action_timeout  = 18;
+                frame_counter   = 0;
+
+                prev_cell_x = cell_x;
+                prev_cell_y = cell_y;
+
+                switch (current_action) {
+                case NONE:
+                    if (cell_y != ground_level) {
+                        cell_y = ground_level;
+                        OutputDebugString("Fell to the ground!\n");
+                    }
+                    break;
+
+                case GO_UP:
+                    if (cell_y == ground_level)
+                        cell_y -= 1;
+                    else {
+                        OutputDebugString("Flopped\n");
+                        cell_y = ground_level;
+                    }
+                    break;
+
+                case GO_DOWN:
+                    if (cell_y == ground_level)
+                        OutputDebugString("Crouch!!\n");
+                    else {
+                        cell_y = ground_level;
+                        OutputDebugString("Slam!\n");
+                    }
+                    break;
+
+                case GO_LEFT:
+                    cell_x -= 1;
+                    flipped = true;
+                    if (cell_y < ground_level)
+                        cell_y = ground_level;
+                    if (cell_x < 1)
+                        OutputDebugString("Falling!!!!\n");
+                    break;
+
+                case GO_RIGHT:
+                    cell_x += 1;
+                    flipped = false;
+                    if (cell_y < ground_level)
+                        cell_y = ground_level;
+                    if (cell_x > 5)
+                        OutputDebugString("Falling!!!!\n");
+                    break;
+
+                default:
+                    break;
+                }
+
+                next_action = UNSPECIFIED;
+            }
+        }
+    }
+
     void render(SDL_Renderer* renderer) {
-        SDL_Rect src;
-        src.x = frame * 45;
-        src.y = 0;
-        src.w = 45;
-        src.h = 45;
+        SDL_Rect src = { frame * 45, 0,   45, 45 };
 
-        SDL_Rect dest;
-        dest.x = cell_x * 45 * scale;
-        dest.y = (17 + cell_y * 45) * scale;
-        dest.w = 45 * scale;
-        dest.h = 45 * scale;
+        SDL_Rect dest = {
+            (cell_x * 45 * scale), ((17 + cell_y * 45) * scale),
+            (45 * scale), (45 * scale)
+        };
 
-        SDL_RenderCopy(renderer, tex, &src, &dest);
+        if (current_action == GO_RIGHT || current_action == GO_LEFT) {
+            SDL_Rect fsrc = { 0, 0, 45, 45 };
+            SDL_Rect fdest = {
+                (prev_cell_x * 45 * scale), ((17 + prev_cell_y * 45) * scale),
+                (45 * scale), (45 * scale)
+            };
+
+            if (current_action == GO_RIGHT) fdest.x += 10;
+            if (current_action == GO_LEFT)  fdest.x -= 10;
+
+            SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 2);
+            SDL_RenderCopyEx(renderer, tex, &fsrc, &fdest, 0, 0, sdl_flip());
+            SDL_SetTextureAlphaMod(tex, 255);
+
+            fsrc.x += (frame_counter / 7 - 1) * 45;
+            if (current_action == GO_RIGHT) fdest.x += 20;
+            if (current_action == GO_LEFT)  fdest.x -= 20;
+            SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+        }
+
+        SDL_RenderCopyEx(renderer, tex, &src, &dest, 0, 0, sdl_flip());
+        SDL_RenderCopyEx(renderer, sword_tex, &src, &dest, 0, 0, sdl_flip());
     }
 };
 
-#define pressed(ctl) (controls[ctl] && !last_controls[ctl])
+#define keypressed(ctl) (controls[ctl] && !last_controls[ctl])
 
 #ifdef _WIN32
 int WinMain(HINSTANCE hinst, HINSTANCE prev, LPSTR cmdline, int cmdshow) {
@@ -107,12 +238,23 @@ int main() {
     memset(&controls, 0, sizeof(controls));
 
     // =================== Load Some Assets ===================
-    player_surface = IMG_Load("assets/player.png");
+    player_surface = IMG_Load("assets/player/player.png");
 
     temp_surface = IMG_Load("assets/mountaintop.png");
     tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
-    SDL_Rect bg_rect;
-    bg_rect.x = 0; bg_rect.y = 0; bg_rect.w = window_width; bg_rect.h = window_height;
+    SDL_FreeSurface(temp_surface);
+
+    temp_surface = IMG_Load("assets/player/sword.png");
+    tex.sword = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_FreeSurface(temp_surface);
+
+    temp_surface = IMG_Load("assets/player/swoosh.png");
+    tex.swoosh = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_SetTextureAlphaMod(tex.swoosh, 155);
+    SDL_FreeSurface(temp_surface);
+
+    temp_surface = IMG_Load("assets/ui/gridcell.png");
+    tex.grid_cell = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
     if (Mix_OpenAudio(MIX_DEFAULT_FREQUENCY, MIX_DEFAULT_FORMAT, MIX_DEFAULT_CHANNELS, 2048) == -1)
@@ -127,9 +269,7 @@ int main() {
         Mix_PlayMusic(music.ominous, -1);
 
     // ====================== Initialize Player ======================
-    Player player(renderer, player_surface, 0);
-    player.cell_x = 1;
-    player.cell_y = 1;
+    Player player(renderer, player_surface, &tex, 0);
 
     // ============ Stuff for game loop management ===============
     SDL_Event event;
@@ -153,10 +293,13 @@ int main() {
         controls[RIGHT] = keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D];
 
         // ================= Game Logic ===================
-        if (pressed(RIGHT)) player.cell_x += 1;
-        if (pressed(LEFT)) player.cell_x -= 1;
-        if (pressed(UP)) player.cell_y -= 1;
-        if (pressed(DOWN)) player.cell_y += 1;
+        if      (controls[RIGHT]) player.next_action = GO_RIGHT;
+        else if (controls[LEFT])  player.next_action = GO_LEFT;
+        else if (controls[UP])    player.next_action = GO_UP;
+        else if (controls[DOWN])  player.next_action = GO_DOWN;
+        else player.next_action = UNSPECIFIED;
+
+        player.update();
 
         // ====================== Render ========================
         SDL_RenderClear(renderer);
