@@ -31,6 +31,7 @@ struct Textures {
     SDL_Texture* sword;
     SDL_Texture* swoosh;
     SDL_Texture* grid_cell;
+    SDL_Texture* cloud;
 };
 
 struct Musics {
@@ -204,7 +205,45 @@ struct Player {
     }
 };
 
+struct Cloud {
+    SDL_Texture* tex;
+    SDL_Rect rect;
+    int speed;
+    int move_timeout;
+    int frame;
+    int screen_width;
+
+    void initialize(int screen_width, int screen_height, SDL_Texture* tex) {
+        this->tex = tex;
+        this->screen_width = screen_width;
+        rect = {
+            (rand() % screen_width) - 128*scale, screen_height - rand() % (72*scale),
+            128 * scale, 64 * scale
+        };
+        if (rand() % 10 > 7) rect.y -= 80;
+        frame = rand() % 4;
+        speed = rand() % 5;
+        move_timeout = 0;
+    }
+
+    void render(SDL_Renderer* renderer) {
+        SDL_Rect src = { 128 * frame, 0, 128, 64 };
+        SDL_RenderCopy(renderer, tex, &src, &rect);
+
+        if (move_timeout > 0)
+            move_timeout -= 1;
+        else {
+            rect.x += 1;
+            move_timeout = 10 - speed;
+
+            if (rect.x > screen_width)
+                rect.x = -128 * scale;
+        }
+    }
+};
+
 #define keypressed(ctl) (controls[ctl] && !last_controls[ctl])
+const int NUM_CLOUDS = 15;
 
 #ifdef _WIN32
 int WinMain(HINSTANCE hinst, HINSTANCE prev, LPSTR cmdline, int cmdshow) {
@@ -221,6 +260,7 @@ int main() {
     Musics music;
     bool last_controls[4];
     bool controls[4];
+    Cloud clouds[NUM_CLOUDS];
 
     // ================== Initialize things ====================
     if (!SDL_Init(SDL_INIT_AUDIO) == -1) { exit(1); }
@@ -257,6 +297,11 @@ int main() {
     tex.grid_cell = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
+    temp_surface = IMG_Load("assets/clouds.png");
+    tex.cloud = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_SetTextureAlphaMod(tex.cloud, 155);
+    SDL_FreeSurface(temp_surface);
+
     if (Mix_OpenAudio(MIX_DEFAULT_FREQUENCY, MIX_DEFAULT_FORMAT, MIX_DEFAULT_CHANNELS, 2048) == -1)
         exit(3);
     music.ominous = Mix_LoadMUS("assets/music/ominous.ogg");
@@ -268,8 +313,10 @@ int main() {
     else
         Mix_PlayMusic(music.ominous, -1);
 
-    // ====================== Initialize Player ======================
+    // ====================== Initialize Player And Scenery ======================
     Player player(renderer, player_surface, &tex, 0);
+    for (int i = 0; i < NUM_CLOUDS; i++)
+        clouds[i].initialize(window_width, window_height, tex.cloud);
 
     // ============ Stuff for game loop management ===============
     SDL_Event event;
@@ -306,6 +353,8 @@ int main() {
 
         SDL_RenderCopy(renderer, tex.background, NULL, NULL);
         player.render(renderer);
+        for (int i = 0; i < NUM_CLOUDS; i++)
+            clouds[i].render(renderer);
 
         SDL_RenderPresent(renderer);
 
