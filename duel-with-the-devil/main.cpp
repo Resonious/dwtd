@@ -28,6 +28,7 @@ void ChangeColorTo(SDL_Surface* surface, Uint32 color) {
 
 struct Textures {
     SDL_Texture* background;
+    SDL_Texture* platform;
     SDL_Texture* sword;
     SDL_Texture* swoosh;
     SDL_Texture* grid_cell;
@@ -38,6 +39,13 @@ struct Musics {
     Mix_Music* ominous;
 };
 
+struct Sounds {
+    Mix_Chunk* move;
+    Mix_Chunk* jump;
+    Mix_Chunk* swipe;
+    Mix_Chunk* crouch;
+};
+
 enum Controls { UP, DOWN, LEFT, RIGHT };
 enum Actions { UNSPECIFIED, GO_UP, GO_DOWN, GO_LEFT, GO_RIGHT, NONE };
 
@@ -45,6 +53,7 @@ struct Player {
     SDL_Texture* tex;
     SDL_Texture* sword_tex;
     SDL_Texture* swoosh_tex;
+    Sounds* sfx;
     int cell_x, cell_y, prev_cell_x, prev_cell_y;
     // This increments each frame, and is set to 0 when an action is used.
     unsigned int frame_counter;
@@ -59,7 +68,7 @@ struct Player {
     // The cell_y value of the ground.
     const int ground_level = 2;
 
-    Player(SDL_Renderer* rend, SDL_Surface* surface, Textures* textures, Uint32 color) {
+    Player(SDL_Renderer* rend, SDL_Surface* surface, Textures* textures, Sounds* sounds, Uint32 color) {
         if (color != 0) ChangeColorTo(surface, color);
         tex        = SDL_CreateTextureFromSurface(rend, surface);
         sword_tex  = textures->sword;
@@ -75,6 +84,7 @@ struct Player {
         prev_cell_y = ground_level;
         flipped = false;
         moved = false;
+        sfx = sounds;
     }
 
     ~Player() {
@@ -161,8 +171,10 @@ struct Player {
                     break;
 
                 case GO_UP:
-                    if (cell_y == ground_level)
+                    if (cell_y == ground_level) {
                         cell_y -= 1;
+                        Mix_PlayChannel(-1, sfx->jump, 0);
+                    }
                     else {
                         OutputDebugString("Flopped\n");
                         cell_y = ground_level;
@@ -170,6 +182,7 @@ struct Player {
                     break;
 
                 case GO_DOWN:
+                    Mix_PlayChannel(-1, sfx->crouch, 0);
                     if (cell_y == ground_level)
                         OutputDebugString("Crouch!!\n");
                     else {
@@ -182,8 +195,12 @@ struct Player {
                     cell_x -= 1;
                     if (previous_action != GO_DOWN)
                         flipped = true;
-                    if (cell_y < ground_level)
+                    if (cell_y < ground_level) {
+                        Mix_PlayChannel(-1, sfx->swipe, 0);
                         cell_y = ground_level;
+                    }
+                    else
+                        Mix_PlayChannel(-1, sfx->move, 0);
                     if (cell_x < 1)
                         OutputDebugString("Falling!!!!\n");
                     break;
@@ -192,8 +209,12 @@ struct Player {
                     cell_x += 1;
                     if (previous_action != GO_DOWN)
                         flipped = false;
-                    if (cell_y < ground_level)
+                    if (cell_y < ground_level) {
                         cell_y = ground_level;
+                        Mix_PlayChannel(-1, sfx->swipe, 0);
+                    }
+                    else
+                        Mix_PlayChannel(-1, sfx->move, 0);
                     if (cell_x > 5)
                         OutputDebugString("Falling!!!!\n");
                     break;
@@ -345,6 +366,7 @@ int main() {
     SDL_Surface* temp_surface;
     Textures tex;
     Musics music;
+    Sounds sfx;
     bool last_controls[4];
     bool controls[4];
     Cloud clouds[NUM_CLOUDS];
@@ -353,6 +375,7 @@ int main() {
     // ================== Initialize things ====================
     if (!SDL_Init(SDL_INIT_AUDIO) == -1) { exit(1); }
     if (Mix_Init(MIX_INIT_OGG) & MIX_INIT_OGG != MIX_INIT_OGG) { exit(2); }
+    Mix_AllocateChannels(15);
 
     window = SDL_CreateWindow(
         "A Duel With the Devil",
@@ -368,8 +391,12 @@ int main() {
     // =================== Load Some Assets ===================
     player_surface = IMG_Load("assets/player/player.png");
 
-    temp_surface = IMG_Load("assets/mountaintop.png");
+    temp_surface = IMG_Load("assets/sky.png");
     tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_FreeSurface(temp_surface);
+
+    temp_surface = IMG_Load("assets/mountain.png");
+    tex.platform = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
     temp_surface = IMG_Load("assets/player/sword.png");
@@ -402,8 +429,13 @@ int main() {
     else
         Mix_PlayMusic(music.ominous, -1);
 
+    sfx.move   = Mix_LoadWAV("assets/sfx/move.wav");
+    sfx.jump   = Mix_LoadWAV("assets/sfx/jump.wav");
+    sfx.swipe  = Mix_LoadWAV("assets/sfx/swipe.wav");
+    sfx.crouch = Mix_LoadWAV("assets/sfx/crouch.wav");
+
     // ====================== Initialize Things That Do Stuff ======================
-    Player player(renderer, player_surface, &tex, 0);
+    Player player(renderer, player_surface, &tex, &sfx, 0);
     for (int i = 0; i < NUM_CLOUDS; i++)
         clouds[i].initialize(window_width, window_height, tex.cloud);
 
@@ -496,8 +528,14 @@ int main() {
         SDL_RenderClear(renderer);
 
         SDL_RenderCopy(renderer, tex.background, NULL, NULL);
+        for (int i = 0; i < NUM_CLOUDS / 2; i++)
+            clouds[i].render(renderer);
+
+        SDL_RenderCopy(renderer, tex.platform, NULL, NULL);
+
         player.render(renderer);
-        for (int i = 0; i < NUM_CLOUDS; i++)
+
+        for (int i = NUM_CLOUDS / 2; i < NUM_CLOUDS; i++)
             clouds[i].render(renderer);
 
         SDL_RenderPresent(renderer);
