@@ -30,6 +30,7 @@ struct Textures {
     SDL_Texture* background;
     SDL_Texture* platform;
     SDL_Texture* sword;
+    SDL_Texture* horns;
     SDL_Texture* swoosh;
     SDL_Texture* grid_cell;
     SDL_Texture* cloud;
@@ -37,6 +38,7 @@ struct Textures {
 
 struct Musics {
     Mix_Music* ominous;
+    Mix_Music* death;
 };
 
 struct Sounds {
@@ -52,6 +54,7 @@ enum Actions { UNSPECIFIED, GO_UP, GO_DOWN, GO_LEFT, GO_RIGHT, NONE };
 struct Player {
     SDL_Texture* tex;
     SDL_Texture* sword_tex;
+    SDL_Texture* horns_tex;
     SDL_Texture* swoosh_tex;
     Sounds* sfx;
     int cell_x, cell_y, prev_cell_x, prev_cell_y;
@@ -64,6 +67,9 @@ struct Player {
     int action_timeout;
     bool flipped;
     bool moved;
+    bool falling;
+    bool dead;
+    bool devil;
 
     // The cell_y value of the ground.
     const int ground_level = 2;
@@ -72,19 +78,23 @@ struct Player {
         if (color != 0) ChangeColorTo(surface, color);
         tex        = SDL_CreateTextureFromSurface(rend, surface);
         sword_tex  = textures->sword;
+        horns_tex  = textures->horns;
         swoosh_tex = textures->swoosh;
+        sfx        = sounds;
         frame      = 2;
         current_action  = NONE;
         previous_action = NONE;
         next_action     = UNSPECIFIED;
-        action_timeout = 0;
-        cell_x = 1;
-        cell_y = ground_level;
-        prev_cell_x = 1;
-        prev_cell_y = ground_level;
-        flipped = false;
-        moved = false;
-        sfx = sounds;
+        action_timeout  = 0;
+        cell_x          = 1;
+        cell_y          = ground_level;
+        prev_cell_x     = 1;
+        prev_cell_y     = ground_level;
+        flipped         = false;
+        moved           = false;
+        falling         = false;
+        dead  = false;
+        devil = false;
     }
 
     ~Player() {
@@ -143,6 +153,7 @@ struct Player {
     }
 
     void update() {
+        if (falling) { frame_counter += 1; return; }
         assign_frame();
 
         if (action_timeout > 0) {
@@ -228,6 +239,15 @@ struct Player {
                     break;
                 }
 
+                if ((cell_x <= 0 || cell_x >= 7) && cell_y == ground_level && previous_action != GO_DOWN) {
+                    frame = 7;
+                    frame_counter = 0;
+                    falling = true;
+                    if (cell_x <= 0) flipped = false;
+                    else flipped = true;
+                    dead = true;
+                }
+
                 next_action = UNSPECIFIED;
             }
         }
@@ -240,76 +260,92 @@ struct Player {
             (cell_x * 45 * scale), ((17 + cell_y * 45) * scale),
             (45 * scale), (45 * scale)
         };
+        SDL_Point center {21, 29};
+        double angle = 0;
 
-        // =========================== Special Effects For Moving Left/Right ======================
-        if (current_action == GO_RIGHT || current_action == GO_LEFT) {
-            // Shadow frame 2 -----v
-            SDL_Rect fsrc = { 45 * 2, 0, 45, 45 };
-            SDL_Rect fdest = {
-                (prev_cell_x * 45 * scale), ((17 + prev_cell_y * 45) * scale),
-                (45 * scale), (45 * scale)
-            };
-
-            // Shift shadow image forwards a bit so that it doesn't looks like we're teleporting.
-            SDL_Rect shadowdest = fdest;
-            if (current_action == GO_RIGHT) shadowdest.x += (10 + frame_counter) * scale;
-            if (current_action == GO_LEFT)  shadowdest.x -= (10 + frame_counter) * scale;
-
-            SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 9);
-            SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
-            SDL_SetTextureAlphaMod(tex, 255);
-
-            // Sword swoosh!
-            if (previous_action == GO_UP) {
-                int swoosh_frame = 0 + (frame_counter / 2);
-                if (swoosh_frame < 4) {
-                    fsrc.x = swoosh_frame * 45;
-                    if (current_action == GO_RIGHT) fdest.x += 50 * scale;
-                    if (current_action == GO_LEFT)  fdest.x -= 50 * scale;
-                    fdest.y += 40 * scale;
-                    SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
-                }
-            }
-            else {
-                // Swoosh frame:
-                int swoosh_frame = 7 + (frame_counter / 2);
-                if (swoosh_frame < 10) {
-                    fsrc.x = swoosh_frame * 45;
-                    // Shift further forwards for swoosh.
-                    if (current_action == GO_RIGHT) fdest.x += 20 * scale;
-                    if (current_action == GO_LEFT)  fdest.x -= 20 * scale;
-                    SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
-                }
+        if (falling) {
+            int direction = cell_x <= 0 ? 1 : -1;
+            dest.x += (frame_counter / 10) * direction;
+            dest.y += 10 + frame_counter * 2;
+            angle = double(frame_counter) * 1.15 * -double(direction);
+            if (frame_counter > 60) {
+                dest.w -= (frame_counter - 60) / 2;
+                dest.h -= (frame_counter - 60) / 2;
             }
         }
+        else {
+            // =========================== Special Effects For Moving Left/Right ======================
+            if (current_action == GO_RIGHT || current_action == GO_LEFT) {
+                // Shadow frame 2 -----v
+                SDL_Rect fsrc = { 45 * 2, 0, 45, 45 };
+                SDL_Rect fdest = {
+                    (prev_cell_x * 45 * scale), ((17 + prev_cell_y * 45) * scale),
+                    (45 * scale), (45 * scale)
+                };
+
+                // Shift shadow image forwards a bit so that it doesn't looks like we're teleporting.
+                SDL_Rect shadowdest = fdest;
+                if (current_action == GO_RIGHT) shadowdest.x += (10 + frame_counter) * scale;
+                if (current_action == GO_LEFT)  shadowdest.x -= (10 + frame_counter) * scale;
+                if (previous_action == GO_UP) shadowdest.y += frame_counter * scale;
+
+                SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 9);
+                SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
+                SDL_SetTextureAlphaMod(tex, 255);
+
+                // Sword swoosh!
+                if (previous_action == GO_UP) {
+                    int swoosh_frame = 0 + (frame_counter / 2);
+                    if (swoosh_frame < 4) {
+                        fsrc.x = swoosh_frame * 45;
+                        if (current_action == GO_RIGHT) fdest.x += 50 * scale;
+                        if (current_action == GO_LEFT)  fdest.x -= 50 * scale;
+                        fdest.y += 40 * scale;
+                        SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+                    }
+                }
+                else {
+                    // Swoosh frame:
+                    int swoosh_frame = 7 + (frame_counter / 2);
+                    if (swoosh_frame < 10) {
+                        fsrc.x = swoosh_frame * 45;
+                        // Shift further forwards for swoosh.
+                        if (current_action == GO_RIGHT) fdest.x += 20 * scale;
+                        if (current_action == GO_LEFT)  fdest.x -= 20 * scale;
+                        SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+                    }
+                }
+            }
         // =========================== Special Effects For Jumping ============================
-        else if (current_action == GO_UP && previous_action != GO_UP) {
-            // Shadow frame 6 -----v
-            SDL_Rect fsrc = { 45 * 6, 0, 45, 45 };
-            SDL_Rect fdest = {
-                (prev_cell_x * 45 * scale), ((17 + prev_cell_y * 45) * scale),
-                (45 * scale), (45 * scale)
-            };
+            else if (current_action == GO_UP && previous_action != GO_UP) {
+                // Shadow frame 6 -----v
+                SDL_Rect fsrc = { 45 * 6, 0, 45, 45 };
+                SDL_Rect fdest = {
+                    (prev_cell_x * 45 * scale), ((17 + prev_cell_y * 45) * scale),
+                    (45 * scale), (45 * scale)
+                };
 
-            SDL_Rect shadowdest = fdest;
-            shadowdest.y -= (10 + frame_counter) * scale;
+                SDL_Rect shadowdest = fdest;
+                shadowdest.y -= (10 + frame_counter) * scale;
 
-            SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 9);
-            SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
-            SDL_SetTextureAlphaMod(tex, 255);
+                SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 9);
+                SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
+                SDL_SetTextureAlphaMod(tex, 255);
 
-            // Swoosh frame:
-            int swoosh_frame = 4 + (frame_counter / 2);
-            if (swoosh_frame < 6) {
-                fsrc.x = swoosh_frame * 45;
-                // Shift further upwards for swoosh.
-                fdest.y -= 10 * scale;
-                SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+                // Swoosh frame:
+                int swoosh_frame = 4 + (frame_counter / 2);
+                if (swoosh_frame < 6) {
+                    fsrc.x = swoosh_frame * 45;
+                    // Shift further upwards for swoosh.
+                    fdest.y -= 10 * scale;
+                    SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+                }
             }
         }
 
-        SDL_RenderCopyEx(renderer, tex, &src, &dest, 0, 0, sdl_flip());
-        SDL_RenderCopyEx(renderer, sword_tex, &src, &dest, 0, 0, sdl_flip());
+        SDL_RenderCopyEx(renderer, tex, &src, &dest, angle, &center, sdl_flip());
+        SDL_RenderCopyEx(renderer, sword_tex, &src, &dest, angle, &center, sdl_flip());
+        if (devil) SDL_RenderCopyEx(renderer, horns_tex, &src, &dest, angle, &center, sdl_flip());
     }
 };
 
@@ -410,6 +446,10 @@ int main() {
     tex.sword = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
+    temp_surface = IMG_Load("assets/player/horns.png");
+    tex.horns = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_FreeSurface(temp_surface);
+
     temp_surface = IMG_Load("assets/player/swoosh.png");
     tex.swoosh = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_SetTextureAlphaMod(tex.swoosh, 155);
@@ -428,13 +468,8 @@ int main() {
     if (Mix_OpenAudio(MIX_DEFAULT_FREQUENCY, MIX_DEFAULT_FORMAT, MIX_DEFAULT_CHANNELS, 2048) == -1)
         exit(3);
     music.ominous = Mix_LoadMUS("assets/music/ominous.ogg");
-    if (!music.ominous) {
-        char shit[100];
-        sprintf(shit, "Problem loading music: %s\n", Mix_GetError());
-        OutputDebugString(shit);
-    }
-    else
-        Mix_PlayMusic(music.ominous, -1);
+    music.death = Mix_LoadMUS("assets/music/death.ogg");
+    Mix_PlayMusic(music.ominous, -1);
 
     sfx.move   = Mix_LoadWAV("assets/sfx/move.wav");
     sfx.jump   = Mix_LoadWAV("assets/sfx/jump.wav");
@@ -443,7 +478,6 @@ int main() {
 
     // ====================== Initialize Things That Do Stuff ======================
     Player player(renderer, player_surface, &tex, &sfx, 0);
-    // 0xFFAD8469
     Player enemy(renderer, dummy_surface, &tex, &sfx, 0xFF6984AD);
     enemy.cell_x = 6;
     enemy.flipped = true;
@@ -465,6 +499,8 @@ int main() {
     bool moved_from[4];
     memset(moved_from, 0, sizeof(moved_from));
     bool player_just_moved = false;
+
+    bool player_was_dead = false;
 
     while (true) {
         // ============= Frame Setup =================
@@ -517,6 +553,10 @@ int main() {
 
         // ========================== Game Logic =====================
         player.update();
+        if (player.dead && !player_was_dead) {
+            Mix_PlayMusic(music.death, 0);
+            player_was_dead = true;
+        }
 
         // ====================== Postmortem Control Logic ==============
         if (player.moved) {
