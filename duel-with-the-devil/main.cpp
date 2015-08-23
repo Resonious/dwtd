@@ -1,11 +1,19 @@
 #ifdef _WIN32
 #include <Windows.h>
+#else
+#define OutputDebugString(x)
 #endif
 
 #include <stdio.h>
+#ifdef _WIN32
 #include "SDL/SDL.h"
 #include "SDL/SDL_image.h"
 #include "SDL/SDL_mixer.h"
+#else
+#include "SDL2/SDL.h"
+#include "SDL2/SDL_image.h"
+#include "SDL2/SDL_mixer.h"
+#endif
 
 // SDL_main doesn't seem to work with VS2015
 #undef main
