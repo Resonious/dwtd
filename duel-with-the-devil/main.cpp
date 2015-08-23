@@ -21,7 +21,7 @@ void ChangeColorTo(SDL_Surface* surface, Uint32 color) {
         Uint8* pixel_addr = (Uint8*)surface->pixels + y * surface->pitch + x * 4;
         Uint32 pixel = *((Uint32*)pixel_addr);
 
-        if (pixel != 0x00000000)
+        if (pixel == 0xFF000000)
             *(Uint32 *)pixel_addr = color;
     }
 }
@@ -563,6 +563,9 @@ void collide_players(Player* p1, Player* p2, Sounds* sfx) {
 
 // ============================ Enemy AI Functions ==========================
 
+void dummy_ai(Player* player, Player* other_player, void* rawdata) {
+}
+
 // ========= Patrol: Just walk back and forth across the stage ==============
 void patrol_ai(Player* player, Player* other_player, void* rawdata) {
     struct DummyAi {
@@ -595,8 +598,8 @@ void patrol_ai(Player* player, Player* other_player, void* rawdata) {
     }
 }
 
-// ======================= Confused: Jump slash left and right repeatedly. ===============
-void confused_ai(Player* player, Player* other_player, void* rawdata) {
+// ======================= Berserk: Jump slash left and right repeatedly. ===============
+void berserk_ai(Player* player, Player* other_player, void* rawdata) {
     struct ConfusedAi {
         Uint8 initialized;
         int step;
@@ -653,7 +656,6 @@ void sentinel_ai(Player* player, Player* other_player, void* rawdata) {
     struct SentinelAi {
         Uint8 initialized;
         int timer;
-        bool go_towards_center;
     };
     SentinelAi* data = (SentinelAi*)rawdata;
 
@@ -663,16 +665,130 @@ void sentinel_ai(Player* player, Player* other_player, void* rawdata) {
         if (player->cell_x >= 6) {
             player->next_action = GO_LEFT;
             data->timer = 75;
-            data->go_towards_center = true;
         }
         else if (player->cell_x <= 1) {
             player->next_action = GO_RIGHT;
             data->timer = 40;
         }
         else {
-            player->next_action = GO_DOWN;
+            if (abs(other_player->cell_x - player->cell_x) <= 1)
+                player->next_action = GO_DOWN;
+            else
+                player->next_action = UNSPECIFIED;
         }
     }
+}
+
+// ============================ Slickster: Abuses sliding off the ledge and jumping back ==============
+void slickster_ai(Player* player, Player* other_player, void* rawdata) {
+    struct SlicksterAi {
+        Uint8 initialized;
+        int timer;
+        int slick_step;
+        int move_step;
+    };
+    SlicksterAi* data = (SlicksterAi*)rawdata;
+
+    if (data->timer > 0) {
+        data->timer -= 1;
+        return;
+    }
+
+    if (abs(other_player->cell_x - player->cell_x) >= 2) {
+        switch (data->slick_step) {
+        case 0:
+            player->next_action = GO_DOWN;
+            data->timer = 14;
+            data->slick_step += 1;
+            break;
+
+        case 1:
+            player->next_action = GO_RIGHT;
+            data->timer = 14;
+            data->slick_step += 1;
+            break;
+
+        case 2:
+            player->next_action = GO_UP;
+            data->timer = 14;
+            data->slick_step += 1;
+            break;
+
+        case 3:
+            player->next_action = GO_LEFT;
+            data->timer = 14;
+            data->slick_step = 0;
+            break;
+
+        default:
+            data->slick_step = 0;
+            break;
+        }
+    }
+    else {
+        switch (data->move_step) {
+        case 0:
+            if (rand() % 10 >= 5)
+                player->next_action = GO_UP;
+            else
+                player->next_action = GO_DOWN;
+            data->timer = 14;
+            data->move_step += 1;
+            break;
+
+        case 1:
+            if (player->cell_x > other_player->cell_x)
+                player->next_action = GO_LEFT;
+            else
+                player->next_action = GO_RIGHT;
+            data->timer = 50;
+            data->move_step += 1;
+
+        case 2:
+            if (player->cell_x > other_player->cell_x)
+                player->next_action = GO_LEFT;
+            else
+                player->next_action = GO_RIGHT;
+            data->timer = 35;
+            data->move_step = 0;
+
+        default:
+            data->move_step = 0;
+            break;
+        }
+    }
+}
+
+// ========================= Overvant: Does opposite of player character =============
+void observant_ai(Player* player, Player* other_player, void* rawdata) {
+    struct ObservantAi {
+        Uint8 initialized;
+        int timer;
+        Actions action;
+    };
+    ObservantAi* data = (ObservantAi*)rawdata;
+
+    if (data->timer > 0) {
+        data->timer -= 1;
+        if (data->timer == 0)
+            player->next_action = data->action;
+        return;
+    }
+
+    if (other_player->next_action == GO_LEFT)
+        data->action = GO_RIGHT;
+    else if (other_player->next_action == GO_RIGHT)
+        data->action = GO_LEFT;
+    else
+        data->action = other_player->next_action;
+
+    if (player->cell_x <= 1 && player->next_action == GO_LEFT)
+        data->action = UNSPECIFIED;
+    else if (player->cell_x >= 6 && player->next_action == GO_RIGHT)
+        data->action = UNSPECIFIED;
+
+    if (!(data->action == UNSPECIFIED || data->action == NONE))
+        data->timer = 17;
 }
 
 #define keyreleased(ctl) (controls[ctl] && !last_controls[ctl])
@@ -703,8 +819,12 @@ int main() {
     bool last_controls[4];
     bool controls[4];
     Cloud clouds[NUM_CLOUDS];
-    void(*ai_function)(Player*, Player*, void*) = sentinel_ai;
-    void* ai_data = calloc(1024, 1);
+    void(*ai_function)(Player*, Player*, void*) = patrol_ai;
+    void(*stages[])(Player*, Player*, void*) = {
+        dummy_ai, patrol_ai, berserk_ai, sentinel_ai, slickster_ai, observant_ai
+    };
+    int stage = 0;
+    void* ai_data = calloc(128, 1);
 
     // ================== Initialize things ====================
     if (!SDL_Init(SDL_INIT_AUDIO) == -1) { exit(1); }
