@@ -39,6 +39,7 @@ struct Textures {
 struct Musics {
     Mix_Music* ominous;
     Mix_Music* ominous2;
+    Mix_Music* dark;
     Mix_Music* death;
 };
 
@@ -49,6 +50,7 @@ struct Sounds {
     Mix_Chunk* crouch;
     Mix_Chunk* clash1;
     Mix_Chunk* clash2;
+    Mix_Chunk* kill;
 };
 
 enum Controls { UP, DOWN, LEFT, RIGHT };
@@ -129,6 +131,14 @@ struct Player {
         frame = 7;
     }
 
+    void push_back() {
+        cell_x += (flipped ? 1 : -1);
+        if (action_timeout <= 15)
+            action_timeout = 15;
+    }
+
+    void guard() { if(current_action == GO_DOWN) frame = 9; }
+
     SDL_RendererFlip sdl_flip() {
         return flipped ? SDL_FLIP_HORIZONTAL : SDL_FLIP_NONE;
     }
@@ -154,6 +164,8 @@ struct Player {
             break;
 
         case GO_DOWN:
+            // Frame 9 (blocking) gets assigned by collision
+            if (frame == 9) break;
             if (cell_y == ground_level && prev_cell_y < ground_level)
                 frame = 2;
             else
@@ -161,10 +173,10 @@ struct Player {
             break;
 
         case GO_LEFT: case GO_RIGHT:
-            if (previous_action == GO_UP)
-                frame = 0;
-            else
-                frame = 2;
+            // Slash
+            if (previous_action == GO_UP) frame = 0;
+            // Normal stance
+            else frame = 2;
             break;
 
         default:
@@ -222,7 +234,10 @@ struct Player {
                     break;
 
                 case GO_DOWN:
-                    Mix_PlayChannel(3, sfx->crouch, 0);
+                    if (previous_action == GO_DOWN)
+                        frame = 1;
+                    else
+                        Mix_PlayChannel(3, sfx->crouch, 0);
                     if (cell_y == ground_level)
                         OutputDebugString("Crouch!!\n");
                     else {
@@ -289,6 +304,7 @@ struct Player {
 
         if (winner) {
             if (killer) {
+                // Sword swoosh for killing strike
                 SDL_Rect fsrc = { 0, 0, 45, 45 };
                 SDL_Rect fdest = {
                     (cell_x * 45 * scale), ((17 + cell_y * 45) * scale),
@@ -315,7 +331,6 @@ struct Player {
             }
         }
         else if (dead) {
-            // TODO death?
         }
         else {
             // =========================== Special Effects For Moving Left/Right ======================
@@ -484,26 +499,33 @@ CollisionResult walk_into_eachother(Player* p1, Player* p2, Actions _right, Acti
     return NO_COLLISION;
 }
 
-#define PUSH_BACK(p) p->cell_x += (p->flipped ? 1 : -1)
-
-// Catches all cases where p1 walks into p2 while p2 is stationary
+// Catches all cases where p1 walks into (or lands on) p2 while p2 is stationary
 CollisionResult walk_into_another(Player* p1, Player* p2, Player** loser) {
     if (!(p1->cell_x == p2->cell_x && p1->cell_y == p2->cell_y)) return NO_COLLISION;
     if (p2->current_action == GO_LEFT || p2->current_action == GO_RIGHT) return NO_COLLISION;
 
     if (p2->current_action == GO_DOWN) {
-        PUSH_BACK(p1);
-        return CLASH;
+        if ((p2->flipped && p1->current_action == GO_LEFT) || (!p2->flipped && p1->current_action == GO_RIGHT)) {
+            *loser = p2;
+            return KILL;
+        }
+        else {
+            p2->guard();
+            if (p1->previous_action == GO_UP)
+                p2->push_back();
+            p1->push_back();
+            return CLASH;
+        }
     }
     else if ((p1->current_action == GO_RIGHT && p2->previous_action == GO_LEFT)
             ||
             (p1->current_action == GO_LEFT && p2->previous_action == GO_RIGHT)) {
-        PUSH_BACK(p1);
+        p1->push_back();
         return CLASH;
     }
     else if (p1->current_action == NONE) {
         // I think this means p1 fell onto p2
-        PUSH_BACK(p1);
+        p1->push_back();
         return CLASH;
     }
     else if (p1->current_action == GO_DOWN) {
@@ -533,7 +555,7 @@ void collide_players(Player* p1, Player* p2, Sounds* sfx) {
     }
     else if (collision == KILL) {
         loser->die();
-        PUSH_BACK(loser);
+        loser->push_back();
         if (loser == p1) p2->killer = true;
         else             p1->killer = true;
     }
@@ -626,6 +648,33 @@ void confused_ai(Player* player, Player* other_player, void* rawdata) {
     }
 }
 
+// ===================== Sentinel: Hold down and move forwards when close to edge =======================
+void sentinel_ai(Player* player, Player* other_player, void* rawdata) {
+    struct SentinelAi {
+        Uint8 initialized;
+        int timer;
+        bool go_towards_center;
+    };
+    SentinelAi* data = (SentinelAi*)rawdata;
+
+    if (data->timer > 0)
+        data->timer -= 1;
+    else {
+        if (player->cell_x >= 6) {
+            player->next_action = GO_LEFT;
+            data->timer = 75;
+            data->go_towards_center = true;
+        }
+        else if (player->cell_x <= 1) {
+            player->next_action = GO_RIGHT;
+            data->timer = 40;
+        }
+        else {
+            player->next_action = GO_DOWN;
+        }
+    }
+}
+
 #define keyreleased(ctl) (controls[ctl] && !last_controls[ctl])
 #define keypressed(ctl) (!controls[ctl] && last_controls[ctl])
 #define NUM_CLOUDS 15
@@ -654,7 +703,7 @@ int main() {
     bool last_controls[4];
     bool controls[4];
     Cloud clouds[NUM_CLOUDS];
-    void(*ai_function)(Player*, Player*, void*) = confused_ai;
+    void(*ai_function)(Player*, Player*, void*) = sentinel_ai;
     void* ai_data = calloc(1024, 1);
 
     // ================== Initialize things ====================
@@ -712,9 +761,10 @@ int main() {
 
     if (Mix_OpenAudio(MIX_DEFAULT_FREQUENCY, MIX_DEFAULT_FORMAT, MIX_DEFAULT_CHANNELS, 2048) == -1)
         exit(3);
-    music.ominous = Mix_LoadMUS("assets/music/ominous.ogg");
+    music.ominous  = Mix_LoadMUS("assets/music/ominous.ogg");
     music.ominous2 = Mix_LoadMUS("assets/music/ominous2.ogg");
-    music.death = Mix_LoadMUS("assets/music/death.ogg");
+    music.dark     = Mix_LoadMUS("assets/music/dark.ogg");
+    music.death    = Mix_LoadMUS("assets/music/death.ogg");
     Mix_PlayMusic(music.ominous, -1);
 
     sfx.move   = Mix_LoadWAV("assets/sfx/move.wav");
@@ -723,6 +773,7 @@ int main() {
     sfx.crouch = Mix_LoadWAV("assets/sfx/crouch.wav");
     sfx.clash1 = Mix_LoadWAV("assets/sfx/clash1.wav");
     sfx.clash2 = Mix_LoadWAV("assets/sfx/clash2.wav");
+    sfx.kill   = Mix_LoadWAV("assets/sfx/kill.wav");
 
     // ====================== Initialize Things That Do Stuff ======================
     Player player(renderer, player_surface, player_swoosh, &tex, &sfx, 0);
@@ -817,6 +868,7 @@ int main() {
             }
             if (enemy.dead && !enemy_was_dead) {
                 OutputDebugString("OMG U KILL THEM\n");
+                Mix_PlayChannel(7, sfx.kill, 0);
                 player.win();
                 enemy_was_dead = true;
             }

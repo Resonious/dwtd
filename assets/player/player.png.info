@@ -4,3 +4,4 @@ idle frame 1 offset = 2
 jump frame 1 offset = 5
 xfall frame 1 offset = 7
 xxkill frame 1 offset = 8
+xxxblock frame 1 offset = 9
