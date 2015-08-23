@@ -103,7 +103,6 @@ struct Player {
         falling         = false;
         frame = 2;
         dead  = false;
-        devil = false;
         winner = false;
         killer = false;
     }
@@ -120,15 +119,23 @@ struct Player {
         horns_tex  = textures->horns;
         sfx        = sounds;
         initialize();
+        devil = false;
     }
 
     ~Player() {
         SDL_DestroyTexture(tex);
+        SDL_DestroyTexture(swoosh_tex);
     }
 
-    void refresh_texture(SDL_Renderer* rend, SDL_Surface* surface) {
+    void refresh_texture(SDL_Renderer* rend, SDL_Surface* surface, SDL_Surface* swoosh_surf, Uint32 color) {
+        if (color != 0) {
+            ChangeColorTo(surface, color);
+            ChangeColorTo(swoosh_surf, color);
+        }
         SDL_DestroyTexture(tex);
+        SDL_DestroyTexture(swoosh_tex);
         tex = SDL_CreateTextureFromSurface(rend, surface);
+        swoosh_tex = SDL_CreateTextureFromSurface(rend, swoosh_surf);
     }
 
     void win() {
@@ -362,6 +369,11 @@ struct Player {
 
                 SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 9);
                 SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
+                if (devil) {
+                    SDL_SetTextureAlphaMod(horns_tex, 155 - frame_counter * 9);
+                    SDL_RenderCopyEx(renderer, horns_tex, &fsrc, &shadowdest, angle, &center, sdl_flip());
+                    SDL_SetTextureAlphaMod(horns_tex, 255);
+                }
                 SDL_SetTextureAlphaMod(tex, 255);
 
                 // Sword swoosh!
@@ -402,6 +414,11 @@ struct Player {
 
                 SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 9);
                 SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
+                if (devil) {
+                    SDL_SetTextureAlphaMod(horns_tex, 155 - frame_counter * 9);
+                    SDL_RenderCopyEx(renderer, horns_tex, &fsrc, &shadowdest, angle, &center, sdl_flip());
+                    SDL_SetTextureAlphaMod(horns_tex, 255);
+                }
                 SDL_SetTextureAlphaMod(tex, 255);
 
                 // Swoosh frame:
@@ -480,17 +497,25 @@ CollisionResult walk_into_eachother(Player* p1, Player* p2, Actions _right, Acti
             p2->cell_x += 1 * mod;
             return CLASH;
         }
-        else if (p1->previous_action == GO_DOWN && !p2->previous_action == GO_DOWN) {
+        else if (p1->previous_action == GO_DOWN && p2->previous_action != GO_DOWN) {
             p2->cell_x += 1 * mod;
             return CLASH;
         }
-        else if (p2->previous_action == GO_DOWN && !p1->previous_action == GO_DOWN) {
+        else if (p2->previous_action == GO_DOWN && p1->previous_action != GO_DOWN) {
             p1->cell_x -= 1 * mod;
             return CLASH;
         }
         else if (p2->previous_action == GO_DOWN && p1->previous_action == GO_DOWN) {
             p1->cell_x -= 1 * mod;
             p2->cell_x += 1 * mod;
+            return CLASH;
+        }
+        else if (p2->previous_action == _left && p1->previous_action == GO_DOWN) {
+            p2->cell_x += 1 * mod;
+            return CLASH;
+        }
+        else if (p1->previous_action == _right && p2->previous_action == GO_DOWN) {
+            p1->cell_x -= 1 * mod;
             return CLASH;
         }
         else if (p2->previous_action == _left && p1->previous_action != _right) {
@@ -528,12 +553,6 @@ CollisionResult walk_into_another(Player* p1, Player* p2, Player** loser) {
             p1->push_back();
             return CLASH;
         }
-    }
-    else if ((p1->current_action == GO_RIGHT && p2->previous_action == GO_LEFT)
-            ||
-            (p1->current_action == GO_LEFT && p2->previous_action == GO_RIGHT)) {
-        p1->push_back();
-        return CLASH;
     }
     else if (p1->current_action == NONE) {
         // I think this means p1 fell onto p2
@@ -628,6 +647,9 @@ void berserk_ai(Player* player, Player* other_player, void* rawdata) {
     if (data->timer > 0) {
         data->timer -= 1;
     }
+    else if (!player->moved && abs(player->cell_x - other_player->cell_x) == 1) {
+        player->next_action = GO_DOWN;
+    }
     else {
         switch (data->step) {
         case 0:
@@ -668,6 +690,7 @@ void sentinel_ai(Player* player, Player* other_player, void* rawdata) {
     struct SentinelAi {
         Uint8 initialized;
         int timer;
+        bool slam_dunk;
     };
     SentinelAi* data = (SentinelAi*)rawdata;
 
@@ -675,16 +698,39 @@ void sentinel_ai(Player* player, Player* other_player, void* rawdata) {
         data->timer -= 1;
     else {
         if (player->cell_x >= 6) {
-            player->next_action = GO_LEFT;
-            data->timer = 75;
+            if (data->slam_dunk) {
+                player->next_action = GO_LEFT;
+                data->timer = 30;
+            }
+            else {
+                player->next_action = GO_UP;
+                data->timer = 14;
+                data->slam_dunk = true;
+            }
         }
         else if (player->cell_x <= 1) {
-            player->next_action = GO_RIGHT;
-            data->timer = 40;
+            if (data->slam_dunk) {
+                player->next_action = GO_RIGHT;
+                data->timer = 30;
+            }
+            else {
+                player->next_action = GO_UP;
+                data->timer = 14;
+                data->slam_dunk = true;
+            }
         }
         else {
-            if (abs(other_player->cell_x - player->cell_x) <= 1)
-                player->next_action = GO_DOWN;
+            if (abs(other_player->cell_x - player->cell_x) <= 1) {
+                if (rand() % 100 > 95) {
+                    if (player->cell_x < other_player->cell_x)
+                        player->next_action = GO_RIGHT;
+                    else
+                        player->next_action = GO_LEFT;
+                    data->timer = 20;
+                }
+                else
+                    player->next_action = GO_DOWN;
+            }
             else
                 player->next_action = UNSPECIFIED;
         }
@@ -993,6 +1039,9 @@ int main() {
     bool fading_out_blank = false;
     int fade_alpha = 0;
 
+    Mix_Music* fade_music_to = NULL;
+    Mix_Music* current_music = music.ominous;
+
     // Man this is getting insane
     bool played_death_music = false;
 
@@ -1116,7 +1165,7 @@ int main() {
                 SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
 
                 // Keep incrementing alpha just so we don't have to hack in another timer lol...
-                if (fade_alpha >= 257) {
+                if (fade_alpha >= 260) {
                     // Re-initialize shit
                     ai_function = stages[stage];
                     memset(ai_data, 0, 128);
@@ -1132,8 +1181,26 @@ int main() {
                     fading_out_blank = true;
 
                     if (played_death_music) {
-                        Mix_PlayMusic(music.ominous, -1);
+                        Mix_PlayMusic(current_music, -1);
                         played_death_music = false;
+                    }
+                    else if (stage == 4 && !player.devil) {
+                        // Intense(er) music
+                        fade_music_to = music.ominous2;
+
+                        // Red sky
+                        SDL_DestroyTexture(tex.background);
+                        temp_surface = IMG_Load("assets/redsky.png");
+                        tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
+                        SDL_FreeSurface(temp_surface);
+
+                        // Faster clouds
+                        for (int i = 0; i < NUM_CLOUDS; i++)
+                            clouds[i].speed += 5;
+
+                        player.devil = true;
+
+                        enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFFFFE4BE);
                     }
                 }
             }
@@ -1155,6 +1222,19 @@ int main() {
         SDL_RenderPresent(renderer);
 
         memcpy(&last_controls, &controls, sizeof(controls));
+
+        // ===================== Handle Music Transition =================
+        if (fade_music_to) {
+            if (current_music) {
+                Mix_FadeOutMusic(500);
+                current_music = NULL;
+            }
+            else if (!Mix_PlayingMusic()) {
+                current_music = fade_music_to;
+                Mix_FadeInMusic(current_music, -1, 500);
+                fade_music_to = NULL;
+            }
+        }
 
         // ======================= Cap Framerate =====================
         Uint64 frame_end = SDL_GetPerformanceCounter();
