@@ -86,6 +86,8 @@ struct Player {
     bool winner;
     bool killer;
     bool action_done;
+    // Used to log behavior for final battle
+    int*** training;
 
     // The cell_y value of the ground.
     const int ground_level = 2;
@@ -109,7 +111,46 @@ struct Player {
         action_done = false;
     }
 
+    // NOTE not even going to try and clean this up in the destructor.
     void initialize_training_data() {
+        // Here's the plan:
+        // action = training[X_DIST][Y_DIST][ENEMY_ACTION]
+        training = (int***)malloc(5 * sizeof(void*)) + 2;
+        for (int i = -2; i < 3; i++) {
+            training[i] = (int**)malloc(5 * sizeof(void*)) + 2;
+            for (int j = -2; j < 3; j++) {
+                training[i][j] = (int*)malloc(NONE * sizeof(Actions));
+                for (int k = 0; k < NONE; k++) {
+                    training[i][j][k] = UNSPECIFIED;
+                }
+            }
+        }
+    }
+
+    Actions predict_action_from(Player* other) {
+        if (current_action < 0) return UNSPECIFIED;
+
+        int x_dist = other->cell_x - cell_x;
+        if (abs(x_dist) > 2) return UNSPECIFIED;
+
+        int y_dist = other->cell_y - cell_y;
+        if (abs(y_dist) > 2) return UNSPECIFIED;
+
+        return (Actions)training[x_dist][y_dist][current_action];
+    }
+
+    void train_against(Player* other) {
+        int x_dist = other->cell_x - cell_x;
+        if (abs(x_dist) > 2) return;
+
+        if (x_dist > 0 && next_action == GO_LEFT) return;
+        if (x_dist < 0 && next_action == GO_RIGHT) return;
+
+        int y_dist = other->cell_y - cell_y;
+        if (abs(y_dist) > 2) return;
+
+        // Just overwrite the previous... Maybe do weights if there's time/incentive.
+        training[x_dist][y_dist][other->current_action] = next_action;
     }
 
     Player(SDL_Renderer* rend, SDL_Surface* surface, SDL_Surface* swoosh_surf, Textures* textures, Sounds* sounds, Uint32 color) {
@@ -130,9 +171,6 @@ struct Player {
     ~Player() {
         SDL_DestroyTexture(tex);
         SDL_DestroyTexture(swoosh_tex);
-    }
-
-    void train_against(Player* other) {
     }
 
     void refresh_texture(SDL_Renderer* rend, SDL_Surface* surface, SDL_Surface* swoosh_surf, Uint32 color) {
@@ -830,30 +868,44 @@ void observant_ai(Player* player, Player* other_player, void* rawdata) {
         Uint8 initialized;
         int timer;
         Actions action;
+        bool realign;
     };
     ObservantAi* data = (ObservantAi*)rawdata;
 
     if (data->timer > 0) {
         data->timer -= 1;
-        if (data->timer == 0)
+        if (data->timer == 0 && !data->realign)
             player->next_action = data->action;
         return;
     }
 
-    if (other_player->next_action == GO_LEFT)
-        data->action = GO_RIGHT;
-    else if (other_player->next_action == GO_RIGHT)
-        data->action = GO_LEFT;
-    else
-        data->action = other_player->next_action;
+    if ((other_player->cell_x - player->cell_x) % 2 == 0) {
+        player->next_action = GO_DOWN;
+        data->realign = true;
+        data->timer = 14;
+    }
+    else if (data->realign) {
+        if (player->cell_x > other_player->cell_x) player->next_action = GO_RIGHT;
+        else player->next_action = GO_LEFT;
+        data->realign = false;
+        data->timer = 14;
+    }
+    else {
+        if (other_player->next_action == GO_LEFT)
+            data->action = GO_RIGHT;
+        else if (other_player->next_action == GO_RIGHT)
+            data->action = GO_LEFT;
+        else
+            data->action = other_player->next_action;
 
-    if (player->cell_x <= 1 && player->next_action == GO_LEFT)
-        data->action = UNSPECIFIED;
-    else if (player->cell_x >= 6 && player->next_action == GO_RIGHT)
-        data->action = UNSPECIFIED;
+        if (player->cell_x <= 1 && player->next_action == GO_LEFT)
+            data->action = UNSPECIFIED;
+        else if (player->cell_x >= 6 && player->next_action == GO_RIGHT)
+            data->action = UNSPECIFIED;
 
-    if (!(data->action == UNSPECIFIED || data->action == NONE))
-        data->timer = 23;
+        if (!(data->action == UNSPECIFIED || data->action == NONE))
+            data->timer = 15;
+    }
 }
 
 // ========================= Sneaky: Tries to jump past the player =================
@@ -914,12 +966,50 @@ void neural_ai(Player* player, Player* other_player, void* rawdata) {
     };
     NNAi* data = (NNAi*)rawdata;
 
+    if (data->timer % 15 == 0) {
+        if (abs(other_player->cell_x - player->cell_x) <= 1) {
+            data->timer = 0;
+        }
+    }
+
     if (data->timer > 0) {
         data->timer -= 1;
         return;
     }
 
-    data->timer = 20;
+    if (abs(other_player->cell_x - player->cell_x) <= 2) {
+        player->next_action = other_player->predict_action_from(player);
+        if (player->next_action == UNSPECIFIED) {
+            if (player->current_action != GO_DOWN && rand() % 10 > 5)
+                player->next_action = GO_DOWN;
+            else {
+                if (player->cell_x < other_player->cell_x)
+                    player->next_action = GO_RIGHT;
+                else
+                    player->next_action = GO_LEFT;
+            }
+        }
+        else {
+            if (player->cell_x <= 1 && player->next_action == GO_LEFT)
+                player->next_action = GO_RIGHT;
+            else if (player->cell_x >= 6 && player->next_action == GO_RIGHT)
+                player->next_action = GO_LEFT;
+        }
+        data->timer = 14;
+    }
+    else {
+        if (player->current_action != GO_UP && rand() % 10 > 6) {
+            player->next_action = GO_UP;
+            data->timer = 14;
+        }
+        else {
+            if (player->cell_x < other_player->cell_x)
+                player->next_action = GO_RIGHT;
+            else
+                player->next_action = GO_LEFT;
+            data->timer = 60;
+        }
+    }
 }
 
 #define keyreleased(ctl) (controls[ctl] && !last_controls[ctl])
@@ -954,7 +1044,7 @@ int main() {
         dummy_ai, patrol_ai, berserk_ai, slickster_ai, sneaky_ai,
         observant_ai, sentinel_ai, neural_ai
     };
-    int stage = 7;
+    int stage = 0;
     void(*ai_function)(Player*, Player*, void*) = stages[stage];
     void* ai_data = calloc(128, 1);
 
@@ -1117,8 +1207,7 @@ int main() {
         else if (controls[DOWN]  && !moved_from[DOWN])  player.next_action = GO_DOWN;
         else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
 
-        if (player.action_timeout == 1)
-            player.train_against(&enemy);
+        if (!enemy.devil && player.action_timeout == 1) player.train_against(&enemy);
 
         // ========================== Game Logic =====================
         if (!fading_out_blank) {
