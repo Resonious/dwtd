@@ -81,18 +81,7 @@ struct Player {
     // The cell_y value of the ground.
     const int ground_level = 2;
 
-    Player(SDL_Renderer* rend, SDL_Surface* surface, SDL_Surface* swoosh_surf, Textures* textures, Sounds* sounds, Uint32 color) {
-        if (color != 0) {
-            ChangeColorTo(surface, color);
-            ChangeColorTo(swoosh_surf, color);
-        }
-        tex        = SDL_CreateTextureFromSurface(rend, surface);
-        swoosh_tex = SDL_CreateTextureFromSurface(rend, swoosh_surf);
-        SDL_SetTextureAlphaMod(swoosh_tex, 155);
-        sword_tex  = textures->sword;
-        horns_tex  = textures->horns;
-        sfx        = sounds;
-        frame      = 2;
+    void initialize() {
         current_action  = NONE;
         previous_action = NONE;
         next_action     = UNSPECIFIED;
@@ -104,10 +93,25 @@ struct Player {
         flipped         = false;
         moved           = false;
         falling         = false;
+        frame = 2;
         dead  = false;
         devil = false;
         winner = false;
         killer = false;
+    }
+
+    Player(SDL_Renderer* rend, SDL_Surface* surface, SDL_Surface* swoosh_surf, Textures* textures, Sounds* sounds, Uint32 color) {
+        if (color != 0) {
+            ChangeColorTo(surface, color);
+            ChangeColorTo(swoosh_surf, color);
+        }
+        tex        = SDL_CreateTextureFromSurface(rend, surface);
+        swoosh_tex = SDL_CreateTextureFromSurface(rend, swoosh_surf);
+        SDL_SetTextureAlphaMod(swoosh_tex, 155);
+        sword_tex  = textures->sword;
+        horns_tex  = textures->horns;
+        sfx        = sounds;
+        initialize();
     }
 
     ~Player() {
@@ -819,7 +823,7 @@ int main() {
     bool last_controls[4];
     bool controls[4];
     Cloud clouds[NUM_CLOUDS];
-    void(*ai_function)(Player*, Player*, void*) = patrol_ai;
+    void(*ai_function)(Player*, Player*, void*) = dummy_ai;
     void(*stages[])(Player*, Player*, void*) = {
         dummy_ai, patrol_ai, berserk_ai, sentinel_ai, slickster_ai, observant_ai
     };
@@ -870,9 +874,11 @@ int main() {
     enemy_swoosh  = IMG_Load("assets/player/swoosh.png");
 
     // TODO this isn't used yet... Will it ever be?
+    /*
     temp_surface = IMG_Load("assets/ui/gridcell.png");
     tex.grid_cell = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
+    */
 
     temp_surface = IMG_Load("assets/clouds.png");
     tex.cloud = SDL_CreateTextureFromSurface(renderer, temp_surface);
@@ -920,10 +926,16 @@ int main() {
     memset(moved_from, 0, sizeof(moved_from));
     bool player_just_moved = false;
 
+    // Stuff for managing scene transitions
     bool player_was_dead = false;
     bool enemy_was_dead = false;
+    int fade_timeout = 0;
     bool fading_in_blank = false;
     bool fading_out_blank = false;
+    int fade_alpha = 0;
+
+    // Man this is getting insane
+    bool played_death_music = false;
 
     while (true) {
         // ============= Frame Setup =================
@@ -975,23 +987,36 @@ int main() {
         else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
 
         // ========================== Game Logic =====================
-        if (!(fading_in_blank || fading_out_blank)) {
+        if (!fading_out_blank) {
             ai_function(&enemy, &player, ai_data);
             player.update();
             enemy.update();
             collide_players(&player, &enemy, &sfx);
 
             if (player.dead && !player_was_dead) {
+                Mix_PlayChannel(7, sfx.kill, 0);
                 Mix_PlayMusic(music.death, 0);
+                played_death_music = true;
                 enemy.win();
                 player_was_dead = true;
+
+                stage -= 1;
+                if (stage < 0) stage = 0;
+                fade_timeout = 60;
             }
             if (enemy.dead && !enemy_was_dead) {
-                OutputDebugString("OMG U KILL THEM\n");
                 Mix_PlayChannel(7, sfx.kill, 0);
                 player.win();
                 enemy_was_dead = true;
+
+                stage += 1;
+                // TODO game complete screen instead of game crashing?
+                fade_timeout = 60;
             }
+        }
+        if (fade_timeout > 0) {
+            fade_timeout -= 1;
+            if (fade_timeout == 0) fading_in_blank = true;
         }
 
         // ====================== Postmortem Control Logic ==============
@@ -1025,6 +1050,48 @@ int main() {
 
         for (int i = NUM_CLOUDS / 2; i < NUM_CLOUDS; i++)
             clouds[i].render(renderer);
+
+        if (fading_in_blank) {
+            fade_alpha += 2;
+            if (fade_alpha > 255) {
+                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+
+                // Keep incrementing alpha just so we don't have to hack in another timer lol...
+                if (fade_alpha >= 257) {
+                    // Re-initialize shit
+                    ai_function = stages[stage];
+                    memset(ai_data, 0, 128);
+                    player.initialize();
+                    enemy.initialize();
+                    enemy.cell_x = 6;
+                    enemy.flipped = true;
+                    player_was_dead = false;
+                    enemy_was_dead = false;
+
+                    fade_alpha = 255;
+                    fading_in_blank = false;
+                    fading_out_blank = true;
+
+                    if (played_death_music) {
+                        Mix_PlayMusic(music.ominous, -1);
+                        played_death_music = false;
+                    }
+                }
+            }
+            else {
+                SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
+                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+            }
+        }
+        else if (fading_out_blank) {
+            fade_alpha -= 2;
+            if (fade_alpha <= 0) {
+                fade_alpha = 0;
+                fading_out_blank = false;
+            }
+            SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
+            SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+        }
 
         SDL_RenderPresent(renderer);
 
