@@ -400,6 +400,7 @@ struct Cloud {
 enum CollisionResult { NO_COLLISION = 0, CLASH, KILL };
 
 // Here we cover all possibilities where p1 and p2 BOTH move into the same spot.
+// This is kinda sloppy. I'll do a better job next time. :[
 CollisionResult walk_into_eachother(Player* p1, Player* p2, Actions _right, Actions _left, int mod, Player** loser) {
     if (!(p1->cell_x == p2->cell_x && p1->cell_y == p2->cell_y)) return NO_COLLISION;
 
@@ -448,20 +449,56 @@ CollisionResult walk_into_eachother(Player* p1, Player* p2, Actions _right, Acti
     return NO_COLLISION;
 }
 
+#define PUSH_BACK(p) p->cell_x += (p->flipped ? 1 : -1)
+
+// Catches all cases where p1 walks into p2 while p2 is stationary
+CollisionResult walk_into_another(Player* p1, Player* p2, Player** loser) {
+    if (!(p1->cell_x == p2->cell_x && p1->cell_y == p2->cell_y)) return NO_COLLISION;
+    if (p2->current_action == GO_LEFT || p2->current_action == GO_RIGHT) return NO_COLLISION;
+
+    if (p2->current_action == GO_DOWN) {
+        PUSH_BACK(p1);
+        return CLASH;
+    }
+    else if ((p1->current_action == GO_RIGHT && p2->previous_action == GO_LEFT)
+            ||
+            (p1->current_action == GO_LEFT && p2->previous_action == GO_RIGHT)) {
+        PUSH_BACK(p1);
+        return CLASH;
+    }
+    else if (p1->current_action == NONE) {
+        // I think this means p1 fell onto p2
+        PUSH_BACK(p1);
+        return CLASH;
+    }
+    else if (p1->current_action == GO_DOWN) {
+        // So this means p1 crushed p2 I guess?
+        *loser = p2;
+        return KILL;
+    }
+    else {
+        *loser = p2;
+        return KILL;
+    }
+}
+
 void collide_players(Player* p1, Player* p2, Sounds* sfx) {
     Player* loser = NULL;
 
-    CollisionResult walked = walk_into_eachother(p1, p2, GO_RIGHT, GO_LEFT, 1, &loser);
-    if (!walked) walked =  walk_into_eachother(p1, p2, GO_LEFT, GO_RIGHT, -1, &loser);
+    CollisionResult collision = walk_into_eachother(p1, p2, GO_RIGHT, GO_LEFT, 1, &loser);
+    if (!collision) collision = walk_into_eachother(p1, p2, GO_LEFT, GO_RIGHT, -1, &loser);
+    if (!collision) collision = walk_into_another(p1, p2, &loser);
+    if (!collision) collision = walk_into_another(p2, p1, &loser);
 
-    if (walked == CLASH) {
+    if (collision == CLASH) {
         Mix_Chunk* clash;
         if (rand() % 10 > 5) clash = sfx->clash1;
         else clash = sfx->clash2;
         Mix_PlayChannel(5, clash, 0);
     }
-    else if (walked == KILL) {
+    else if (collision == KILL) {
         loser->dead = true;
+        PUSH_BACK(loser);
     }
 }
 
@@ -677,6 +714,7 @@ int main() {
         }
         if (enemy.dead && !enemy_was_dead) {
             OutputDebugString("OMG U KILL THEM\n");
+            enemy_was_dead = true;
         }
 
         // ====================== Postmortem Control Logic ==============
