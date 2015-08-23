@@ -15,26 +15,11 @@
 #include "SDL2/SDL_mixer.h"
 #endif
 
-#include "doublefann.h"
-
 // SDL_main doesn't seem to work with VS2015
 #undef main
 
 // Oh god a global. Sue me.
 int scale = 2;
-// Also global neural network, so that everything can be recorded EASY
-fann* neural_net;
-/* Neural Network Layers:
- * INPUT:  cell_x, cell_y, enemy_cell_x, enemy_cell_y, prev_action,
- *         cur_action, enemy_prev_action, enemy_cur_action
- * -----------------------------------------------------------------
- * OUTPUT: go_left, go_right, go_up, go_down, unspecified
- */
-#define NN_INPUT 6
-#define NN_HIDDEN 5
-#define NN_OUTPUT 5
-#define RECORD
-
 
 void ChangeColorTo(SDL_Surface* surface, Uint32 color) {
     if (surface->format->BytesPerPixel != 4) exit(5);
@@ -100,16 +85,10 @@ struct Player {
     bool devil;
     bool winner;
     bool killer;
-    // Neural network training!
-    fann_train_data training;
-    double* training_input, ** training_input_indices;
-    double* training_output, ** training_output_indices;
     bool action_done;
 
     // The cell_y value of the ground.
     const int ground_level = 2;
-    // This is per-neuron.
-    const int training_buffer_size = 1024 * 100; // 100kb
 
     void initialize() {
         current_action  = NONE;
@@ -131,17 +110,6 @@ struct Player {
     }
 
     void initialize_training_data() {
-        if (training_input) free(training_input);
-        if (training_output) free(training_output);
-        if (training_input_indices) free(training_input_indices);
-        if (training_output_indices) free(training_output_indices);
-        training_input  = (double*)malloc(training_buffer_size * NN_INPUT);
-        training_output = (double*)malloc(training_buffer_size * NN_OUTPUT);
-        training_input_indices  = (double**)malloc(training_buffer_size);
-        training_output_indices = (double**)malloc(training_buffer_size);
-
-        training.input = training_input_indices;
-        training.output = training_output_indices;
     }
 
     Player(SDL_Renderer* rend, SDL_Surface* surface, SDL_Surface* swoosh_surf, Textures* textures, Sounds* sounds, Uint32 color) {
@@ -155,71 +123,16 @@ struct Player {
         sword_tex  = textures->sword;
         horns_tex  = textures->horns;
         sfx        = sounds;
-        training_input = NULL;
-        training_output = NULL;
-        training_input_indices = NULL;
-        training_output_indices = NULL;
-        training.num_data = 0;
         initialize();
         devil = false;
-        training.num_input  = NN_INPUT;
-        training.num_output = NN_OUTPUT;
     }
 
     ~Player() {
         SDL_DestroyTexture(tex);
         SDL_DestroyTexture(swoosh_tex);
-        if (training_input) free(training_input);
-        if (training_output) free(training_output);
     }
 
     void train_against(Player* other) {
-#ifdef RECORD
-        if (training.num_data >= training_buffer_size) {
-            OutputDebugString("Ran out of room for training data! Nothing more will be recorded.\n");
-            return;
-        }
-
-        double* input = training_input + training.num_data * NN_INPUT;
-        training_input_indices[training.num_data] = input;
-        // NOTE we invert the cell_x because opponent spends more time on other side
-        input[0] = 7 - cell_x;
-        input[1] = cell_y;
-        input[2] = 7 - other->cell_x;
-        input[3] = other->cell_y;
-        input[4] = previous_action;
-        input[5] = current_action;
-
-        double* output = training_output + training.num_data * NN_OUTPUT;
-        training_output_indices[training.num_data] = output;
-        output[0] = next_action == UNSPECIFIED ? -0.9 : -1.0;
-        output[1] = next_action == GO_UP       ? 1.0 : -1.0;
-        output[2] = next_action == GO_DOWN     ? -0.5 : -1.0;
-        // NOTE left and right are reversed since the opponent will be on the other side of the map.
-        output[4] = next_action == GO_LEFT     ? 1.0 : -1.0;
-        output[3] = next_action == GO_RIGHT    ? 1.0 : -1.0;
-
-        training.num_data += 1;
-#else
-        double input[NN_INPUT];
-        // NOTE we invert the cell_x because opponent spends more time on other side
-        input[0] = 7 - cell_x;
-        input[1] = cell_y;
-        input[2] = other->cell_x;
-        input[3] = 7 - other->cell_y;
-        input[4] = previous_action;
-        input[5] = current_action;
-
-        double output[NN_OUTPUT];
-        output[0] = next_action == UNSPECIFIED ? -0.7 : -1.0;
-        output[1] = next_action == GO_UP       ? 1.0 : -1.0;
-        output[2] = next_action == GO_DOWN     ? 0.5 : -1.0;
-        // NOTE we reverse left and right, because of the cell_x inversion.
-        output[4] = next_action == GO_LEFT     ? 1.0 : -1.0;
-        output[3] = next_action == GO_RIGHT    ? 1.0 : -1.0;
-
-        fann_train(neural_net, input, output);
-#endif
     }
 
     void refresh_texture(SDL_Renderer* rend, SDL_Surface* surface, SDL_Surface* swoosh_surf, Uint32 color) {
@@ -993,7 +906,7 @@ void sneaky_ai(Player* player, Player* other_player, void* rawdata) {
     }
 }
 
-// ========================= Neural: uses neural network trained by the player =================
+// ========================= Neural: uses strategies influenced by the player =================
 void neural_ai(Player* player, Player* other_player, void* rawdata) {
     struct NNAi {
         Uint8 initialized;
@@ -1001,46 +914,10 @@ void neural_ai(Player* player, Player* other_player, void* rawdata) {
     };
     NNAi* data = (NNAi*)rawdata;
 
-#ifdef RECORD
-    if (!data->initialized) {
-        fann_train_on_data(
-            neural_net, &other_player->training,
-            1000, 100, 0.01
-        );
-        other_player->training.num_data = 0;
-        data->initialized = true;
-    }
-#endif
-
     if (data->timer > 0) {
         data->timer -= 1;
         return;
     }
-
-    double inputs[] = {
-        player->cell_x, player->cell_y,
-        other_player->cell_x, other_player->cell_y,
-        player->previous_action, player->current_action
-    };
-    double* output = fann_run(neural_net, inputs);
-    Actions max_result = UNSPECIFIED;
-    for (int i = 0; i < NN_OUTPUT; i++) {
-        if (i == GO_LEFT && player->cell_x <= 1) continue;
-        if (i == GO_RIGHT && player->cell_x >= 6) continue;
-        if (output[i] > output[max_result]) max_result = (Actions)i;
-    }
-
-#ifdef _DEBUG
-    char str[64];
-    OutputDebugString("==================================\n");
-    for (int i = 0; i < NN_OUTPUT; i++) {
-        sprintf(str, "%i: %f |", i, output[i]);
-        OutputDebugString(str);
-    }
-    OutputDebugString("==================================\n\n");
-#endif
-
-    player->next_action = max_result;
 
     data->timer = 20;
 }
@@ -1080,17 +957,6 @@ int main() {
     int stage = 7;
     void(*ai_function)(Player*, Player*, void*) = stages[stage];
     void* ai_data = calloc(128, 1);
-
-    // ================== Initialize things ====================
-    /* Neural Network Layers:
-     * INPUT:  cell_x, cell_y, enemy_cell_x, enemy_cell_y, prev_action,
-     *         cur_action, enemy_prev_action, enemy_cur_action
-     * -----------------------------------------------------------------
-     * OUTPUT: go_left, go_right, go_up, go_down, unspecified
-     */
-    neural_net = fann_create_standard(3, NN_INPUT, NN_HIDDEN, NN_OUTPUT);
-	fann_set_activation_function_hidden(neural_net, FANN_SIGMOID_SYMMETRIC);
-	fann_set_activation_function_output(neural_net, FANN_SIGMOID_SYMMETRIC);
 
     if (!SDL_Init(SDL_INIT_AUDIO) == -1) { exit(1); }
     if (Mix_Init(MIX_INIT_OGG) & MIX_INIT_OGG != MIX_INIT_OGG) { exit(2); }
