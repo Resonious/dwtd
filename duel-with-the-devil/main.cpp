@@ -37,6 +37,7 @@ struct Textures {
 
 struct Musics {
     Mix_Music* ominous;
+    Mix_Music* ominous2;
     Mix_Music* death;
 };
 
@@ -71,6 +72,7 @@ struct Player {
     bool falling;
     bool dead;
     bool devil;
+    bool winner;
 
     // The cell_y value of the ground.
     const int ground_level = 2;
@@ -101,6 +103,7 @@ struct Player {
         falling         = false;
         dead  = false;
         devil = false;
+        winner = false;
     }
 
     ~Player() {
@@ -110,6 +113,18 @@ struct Player {
     void refresh_texture(SDL_Renderer* rend, SDL_Surface* surface) {
         SDL_DestroyTexture(tex);
         tex = SDL_CreateTextureFromSurface(rend, surface);
+    }
+
+    void win() {
+        winner = true;
+        frame_counter = 0;
+        frame = 8;
+    }
+
+    void die() {
+        dead = true;
+        frame_counter = 0;
+        frame = 7;
     }
 
     SDL_RendererFlip sdl_flip() {
@@ -159,7 +174,7 @@ struct Player {
     }
 
     void update() {
-        if (falling || dead) { frame_counter += 1; return; }
+        if (falling || dead || winner) { frame_counter += 1; return; }
         assign_frame();
 
         if (action_timeout > 0) {
@@ -269,7 +284,22 @@ struct Player {
         SDL_Point center {21, 29};
         double angle = 0;
 
-        if (falling) {
+        if (winner) {
+            SDL_Rect fsrc = { 0, 0, 45, 45 };
+            SDL_Rect fdest = {
+                (cell_x * 45 * scale), ((17 + cell_y * 45) * scale),
+                (45 * scale), (45 * scale)
+            };
+
+            int swoosh_frame = 7 + (frame_counter / 5);
+            if (swoosh_frame < 11) {
+                fsrc.x = swoosh_frame * 45;
+                if (current_action == GO_RIGHT) fdest.x += 50 * scale;
+                if (current_action == GO_LEFT)  fdest.x -= 50 * scale;
+                SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+            }
+        }
+        else if (falling) {
             int direction = cell_x <= 0 ? 1 : -1;
             dest.x += (frame_counter / 10) * direction;
             dest.y += 10 + frame_counter * 2;
@@ -315,8 +345,8 @@ struct Player {
                 }
                 else {
                     // Swoosh frame:
-                    int swoosh_frame = 7 + (frame_counter / 2);
-                    if (swoosh_frame < 10) {
+                    int swoosh_frame = 11 + (frame_counter / 2);
+                    if (swoosh_frame < 14) {
                         fsrc.x = swoosh_frame * 45;
                         // Shift further forwards for swoosh.
                         if (current_action == GO_RIGHT) fdest.x += 20 * scale;
@@ -497,7 +527,7 @@ void collide_players(Player* p1, Player* p2, Sounds* sfx) {
         Mix_PlayChannel(5, clash, 0);
     }
     else if (collision == KILL) {
-        loser->dead = true;
+        loser->die();
         PUSH_BACK(loser);
     }
 }
@@ -616,6 +646,7 @@ int main() {
     if (Mix_OpenAudio(MIX_DEFAULT_FREQUENCY, MIX_DEFAULT_FORMAT, MIX_DEFAULT_CHANNELS, 2048) == -1)
         exit(3);
     music.ominous = Mix_LoadMUS("assets/music/ominous.ogg");
+    music.ominous2 = Mix_LoadMUS("assets/music/ominous2.ogg");
     music.death = Mix_LoadMUS("assets/music/death.ogg");
     Mix_PlayMusic(music.ominous, -1);
 
@@ -710,10 +741,12 @@ int main() {
         collide_players(&player, &enemy, &sfx);
         if (player.dead && !player_was_dead) {
             Mix_PlayMusic(music.death, 0);
+            enemy.win();
             player_was_dead = true;
         }
         if (enemy.dead && !enemy_was_dead) {
             OutputDebugString("OMG U KILL THEM\n");
+            player.win();
             enemy_was_dead = true;
         }
 

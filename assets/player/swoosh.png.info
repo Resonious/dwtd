@@ -1,3 +1,4 @@
 crush frame 1 offset = 0
 jump frame 1 offset = 4
-move frame 1 offset = 7
+kill frame 1 offset = 7
+move frame 1 offset = 11
