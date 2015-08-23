@@ -803,6 +803,56 @@ void observant_ai(Player* player, Player* other_player, void* rawdata) {
         data->timer = 17;
 }
 
+// ========================= Sneaky: Tries to jump past the player =================
+void sneaky_ai(Player* player, Player* other_player, void* rawdata) {
+    struct SneakyAi {
+        Uint8 initialized;
+        int timer;
+        bool get_at_em;
+        bool finish_them;
+    };
+    SneakyAi* data = (SneakyAi*)rawdata;
+
+    if (data->timer > 0) {
+        data->timer -= 1;
+        return;
+    }
+
+    if (data->get_at_em) {
+        if (player->cell_x > other_player->cell_x) player->next_action = GO_LEFT;
+        else player->next_action = GO_RIGHT;
+        data->timer = 25;
+        data->get_at_em = false;
+        data->finish_them = true;
+    }
+    else if (data->finish_them) {
+        if (player->cell_x > other_player->cell_x) player->next_action = GO_LEFT;
+        else player->next_action = GO_RIGHT;
+        data->timer = 60;
+        data->finish_them = false;
+    }
+    else if (abs(player->cell_x - other_player->cell_x) % 2 == 0) {
+        if (player->cell_x > other_player->cell_x) player->next_action = GO_LEFT;
+        else player->next_action = GO_RIGHT;
+    }
+    else if (abs(player->cell_x - other_player->cell_x) == 1) {
+        player->next_action = GO_UP;
+        data->timer = 13;
+        data->get_at_em = true;
+    }
+    else {
+        if (rand() % 10 > 5)
+            player->next_action = GO_UP;
+        else if (rand() % 10 > 5)
+            player->next_action = GO_DOWN;
+        else {
+            if (player->cell_x > other_player->cell_x) player->next_action = GO_LEFT;
+            else player->next_action = GO_RIGHT;
+        }
+        data->timer = 60;
+    }
+}
+
 #define keyreleased(ctl) (controls[ctl] && !last_controls[ctl])
 #define keypressed(ctl) (!controls[ctl] && last_controls[ctl])
 #define NUM_CLOUDS 15
@@ -831,11 +881,12 @@ int main() {
     bool last_controls[4];
     bool controls[4];
     Cloud clouds[NUM_CLOUDS];
-    void(*ai_function)(Player*, Player*, void*) = dummy_ai;
     void(*stages[])(Player*, Player*, void*) = {
-        dummy_ai, patrol_ai, berserk_ai, sentinel_ai, slickster_ai, observant_ai
+        dummy_ai, patrol_ai, berserk_ai, slickster_ai, sentinel_ai,
+        observant_ai, sneaky_ai
     };
     int stage = 0;
+    void(*ai_function)(Player*, Player*, void*) = stages[stage];
     void* ai_data = calloc(128, 1);
 
     // ================== Initialize things ====================
