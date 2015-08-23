@@ -42,6 +42,7 @@ struct Textures {
     SDL_Texture* horns;
     SDL_Texture* grid_cell;
     SDL_Texture* cloud;
+    SDL_Texture* boss_horns;
 };
 
 struct Musics {
@@ -49,6 +50,7 @@ struct Musics {
     Mix_Music* ominous2;
     Mix_Music* dark;
     Mix_Music* death;
+    Mix_Music* boss;
 };
 
 struct Sounds {
@@ -86,6 +88,7 @@ struct Player {
     bool winner;
     bool killer;
     bool action_done;
+    bool boss;
     // Used to log behavior for final battle
     int*** training;
 
@@ -166,6 +169,7 @@ struct Player {
         sfx        = sounds;
         initialize();
         devil = false;
+        boss = false;
     }
 
     ~Player() {
@@ -412,7 +416,7 @@ struct Player {
 
                 SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 9);
                 SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
-                if (devil) {
+                if (devil || boss) {
                     SDL_SetTextureAlphaMod(horns_tex, 155 - frame_counter * 9);
                     SDL_RenderCopyEx(renderer, horns_tex, &fsrc, &shadowdest, angle, &center, sdl_flip());
                     SDL_SetTextureAlphaMod(horns_tex, 255);
@@ -457,7 +461,7 @@ struct Player {
 
                 SDL_SetTextureAlphaMod(tex, 155 - frame_counter * 9);
                 SDL_RenderCopyEx(renderer, tex, &fsrc, &shadowdest, 0, 0, sdl_flip());
-                if (devil) {
+                if (devil || boss) {
                     SDL_SetTextureAlphaMod(horns_tex, 155 - frame_counter * 9);
                     SDL_RenderCopyEx(renderer, horns_tex, &fsrc, &shadowdest, angle, &center, sdl_flip());
                     SDL_SetTextureAlphaMod(horns_tex, 255);
@@ -476,8 +480,8 @@ struct Player {
         }
 
         SDL_RenderCopyEx(renderer, tex, &src, &dest, angle, &center, sdl_flip());
-        SDL_RenderCopyEx(renderer, sword_tex, &src, &dest, angle, &center, sdl_flip());
-        if (devil) SDL_RenderCopyEx(renderer, horns_tex, &src, &dest, angle, &center, sdl_flip());
+        if (!boss) SDL_RenderCopyEx(renderer, sword_tex, &src, &dest, angle, &center, sdl_flip());
+        if (devil || boss) SDL_RenderCopyEx(renderer, horns_tex, &src, &dest, angle, &center, sdl_flip());
     }
 };
 
@@ -1087,15 +1091,12 @@ int main() {
     tex.horns = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
+    temp_surface = IMG_Load("assets/player/bosshorns.png");
+    tex.boss_horns = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_FreeSurface(temp_surface);
+
     player_swoosh = IMG_Load("assets/player/swoosh.png");
     enemy_swoosh  = IMG_Load("assets/player/swoosh.png");
-
-    // TODO this isn't used yet... Will it ever be?
-    /*
-    temp_surface = IMG_Load("assets/ui/gridcell.png");
-    tex.grid_cell = SDL_CreateTextureFromSurface(renderer, temp_surface);
-    SDL_FreeSurface(temp_surface);
-    */
 
     temp_surface = IMG_Load("assets/clouds.png");
     tex.cloud = SDL_CreateTextureFromSurface(renderer, temp_surface);
@@ -1108,6 +1109,7 @@ int main() {
     music.ominous2 = Mix_LoadMUS("assets/music/ominous2.ogg");
     music.dark     = Mix_LoadMUS("assets/music/dark.ogg");
     music.death    = Mix_LoadMUS("assets/music/death.ogg");
+    music.boss     = Mix_LoadMUS("assets/music/finalboss.ogg");
     Mix_PlayMusic(music.ominous, -1);
 
     sfx.move   = Mix_LoadWAV("assets/sfx/move.wav");
@@ -1157,6 +1159,8 @@ int main() {
 
     // Man this is getting insane
     bool played_death_music = false;
+
+    bool boss_initialized = false;
 
     while (true) {
         // ============= Frame Setup =================
@@ -1232,9 +1236,16 @@ int main() {
                 player.win();
                 enemy_was_dead = true;
 
-                if (stage < sizeof(stages) / sizeof(void*) - 1)
-                    stage += 1;
-                // TODO game complete screen instead of game crashing?
+                if (stage == 7) {
+                    if (enemy.boss) {
+                        // TODO U WIN
+                    }
+                    else {
+                        enemy.boss = true;
+                    }
+                }
+                else stage += 1;
+
                 fade_timeout = 60;
             }
         }
@@ -1281,7 +1292,7 @@ int main() {
                 SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
 
                 // Keep incrementing alpha just so we don't have to hack in another timer lol...
-                if (fade_alpha >= 260) {
+                if (fade_alpha >= enemy.boss ? 300 : 260) {
                     // Re-initialize shit
                     reserve_action = UNSPECIFIED;
                     ai_function = stages[stage];
@@ -1324,6 +1335,32 @@ int main() {
                         enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFF1D00FF);
                         enemy.devil = true;
                     }
+                    else if (enemy.boss && !boss_initialized) {
+                        fade_music_to = music.boss;
+
+                        // Load up the big man skin.
+                        SDL_FreeSurface(enemy_surface);
+                        SDL_FreeSurface(enemy_swoosh);
+                        enemy_surface = IMG_Load("assets/player/boss.png");
+                        enemy_swoosh = IMG_Load("assets/player/boss_swoosh.png");
+                        enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0);
+                        enemy.horns_tex = tex.boss_horns;
+
+                        // Final sky.
+                        SDL_DestroyTexture(tex.background);
+                        temp_surface = IMG_Load("assets/finalsky.png");
+                        tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
+                        SDL_FreeSurface(temp_surface);
+
+                        // FASTER CLOUDS LETS GO.
+                        for (int i = 0; i < NUM_CLOUDS; i++)
+                            clouds[i].speed = 10;
+
+                        // TODO
+                        // ai_function = boss_ai ?
+
+                        boss_initialized = true;
+                    }
                 }
             }
             else {
@@ -1332,7 +1369,7 @@ int main() {
             }
         }
         else if (fading_out_blank) {
-            fade_alpha -= 2;
+            fade_alpha -= enemy.boss ? 4 : 2;
             if (fade_alpha <= 0) {
                 fade_alpha = 0;
                 fading_out_blank = false;
@@ -1348,12 +1385,12 @@ int main() {
         // ===================== Handle Music Transition =================
         if (fade_music_to) {
             if (current_music) {
-                Mix_FadeOutMusic(500);
+                Mix_FadeOutMusic(boss_initialized ? 100 : 500);
                 current_music = NULL;
             }
             else if (!Mix_PlayingMusic()) {
                 current_music = fade_music_to;
-                Mix_FadeInMusic(current_music, -1, 500);
+                Mix_FadeInMusic(current_music, -1, boss_initialized ? 100 : 500);
                 fade_music_to = NULL;
             }
         }
