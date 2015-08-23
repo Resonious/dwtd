@@ -29,6 +29,7 @@ void ChangeColorTo(SDL_Surface* surface, Uint32 color) {
 struct Textures {
     SDL_Texture* background;
     SDL_Texture* platform;
+    SDL_Texture* blank;
     SDL_Texture* sword;
     SDL_Texture* horns;
     SDL_Texture* grid_cell;
@@ -73,6 +74,7 @@ struct Player {
     bool dead;
     bool devil;
     bool winner;
+    bool killer;
 
     // The cell_y value of the ground.
     const int ground_level = 2;
@@ -84,7 +86,6 @@ struct Player {
         }
         tex        = SDL_CreateTextureFromSurface(rend, surface);
         swoosh_tex = SDL_CreateTextureFromSurface(rend, swoosh_surf);
-        SDL_SetTextureAlphaMod(tex, 155);
         SDL_SetTextureAlphaMod(swoosh_tex, 155);
         sword_tex  = textures->sword;
         horns_tex  = textures->horns;
@@ -104,6 +105,7 @@ struct Player {
         dead  = false;
         devil = false;
         winner = false;
+        killer = false;
     }
 
     ~Player() {
@@ -118,7 +120,7 @@ struct Player {
     void win() {
         winner = true;
         frame_counter = 0;
-        frame = 8;
+        if (killer) frame = 8;
     }
 
     void die() {
@@ -174,7 +176,8 @@ struct Player {
     }
 
     void update() {
-        if (falling || dead || winner) { frame_counter += 1; return; }
+        if (winner && !killer) { frame_counter += 1; assign_frame(); return; }
+        else if (falling || dead || winner) { frame_counter += 1; return; }
         assign_frame();
 
         if (action_timeout > 0) {
@@ -285,18 +288,20 @@ struct Player {
         double angle = 0;
 
         if (winner) {
-            SDL_Rect fsrc = { 0, 0, 45, 45 };
-            SDL_Rect fdest = {
-                (cell_x * 45 * scale), ((17 + cell_y * 45) * scale),
-                (45 * scale), (45 * scale)
-            };
+            if (killer) {
+                SDL_Rect fsrc = { 0, 0, 45, 45 };
+                SDL_Rect fdest = {
+                    (cell_x * 45 * scale), ((17 + cell_y * 45) * scale),
+                    (45 * scale), (45 * scale)
+                };
 
-            int swoosh_frame = 7 + (frame_counter / 5);
-            if (swoosh_frame < 11) {
-                fsrc.x = swoosh_frame * 45;
-                if (current_action == GO_RIGHT) fdest.x += 50 * scale;
-                if (current_action == GO_LEFT)  fdest.x -= 50 * scale;
-                SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+                int swoosh_frame = 7 + (frame_counter / 5);
+                if (swoosh_frame < 11) {
+                    fsrc.x = swoosh_frame * 45;
+                    if (current_action == GO_RIGHT) fdest.x += 50 * scale;
+                    if (current_action == GO_LEFT)  fdest.x -= 50 * scale;
+                    SDL_RenderCopyEx(renderer, swoosh_tex, &fsrc, &fdest, 0, 0, sdl_flip());
+                }
             }
         }
         else if (falling) {
@@ -529,10 +534,15 @@ void collide_players(Player* p1, Player* p2, Sounds* sfx) {
     else if (collision == KILL) {
         loser->die();
         PUSH_BACK(loser);
+        if (loser == p1) p2->killer = true;
+        else             p1->killer = true;
     }
 }
 
-void dummy_ai(Player* player, Player* other_player, void* rawdata) {
+// ============================ Enemy AI Functions ==========================
+
+// ========= Patrol: Just walk back and forth across the stage ==============
+void patrol_ai(Player* player, Player* other_player, void* rawdata) {
     struct DummyAi {
         Uint8 initialized;
         bool go_right;
@@ -558,7 +568,60 @@ void dummy_ai(Player* player, Player* other_player, void* rawdata) {
                 }
                 else player->next_action = GO_LEFT;
             }
-            data->timer = 20;
+            data->timer = 50;
+        }
+    }
+}
+
+// ======================= Confused: Jump slash left and right repeatedly. ===============
+void confused_ai(Player* player, Player* other_player, void* rawdata) {
+    struct ConfusedAi {
+        Uint8 initialized;
+        int step;
+        int timer;
+    };
+    ConfusedAi* data = (ConfusedAi*)rawdata;
+
+    if (!data->initialized) {
+        data->initialized = true;
+        player->next_action = GO_LEFT;
+        data->timer = 20;
+    }
+
+    if (data->timer > 0) {
+        data->timer -= 1;
+    }
+    else {
+        switch (data->step) {
+        case 0:
+            player->next_action = GO_LEFT;
+            data->step = 1;
+            data->timer = 50;
+            break;
+
+        case 1:
+            player->next_action = GO_UP;
+            data->step = 2;
+            data->timer = 2;
+            break;
+
+        case 2:
+            player->next_action = GO_RIGHT;
+            data->step = 3;
+            data->timer = 50;
+            break;
+
+        case 3:
+            player->next_action = GO_UP;
+            data->step = 4;
+            data->timer = 2;
+            break;
+
+        case 4:
+            player->next_action = GO_LEFT;
+            data->step = 1;
+            data->timer += 50;
+            break;
         }
     }
 }
@@ -582,8 +645,8 @@ int main() {
     SDL_Renderer* renderer;
     SDL_Surface* player_surface;
     SDL_Surface* player_swoosh;
-    SDL_Surface* dummy_surface;
-    SDL_Surface* dummy_swoosh;
+    SDL_Surface* enemy_surface;
+    SDL_Surface* enemy_swoosh;
     SDL_Surface* temp_surface;
     Textures tex;
     Musics music;
@@ -591,7 +654,7 @@ int main() {
     bool last_controls[4];
     bool controls[4];
     Cloud clouds[NUM_CLOUDS];
-    void(*ai_function)(Player*, Player*, void*) = dummy_ai;
+    void(*ai_function)(Player*, Player*, void*) = confused_ai;
     void* ai_data = calloc(1024, 1);
 
     // ================== Initialize things ====================
@@ -612,7 +675,7 @@ int main() {
 
     // =================== Load Some Assets ===================
     player_surface = IMG_Load("assets/player/player.png");
-    dummy_surface  = IMG_Load("assets/player/player.png");
+    enemy_surface  = IMG_Load("assets/player/player.png");
 
     temp_surface = IMG_Load("assets/sky.png");
     tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
@@ -620,6 +683,10 @@ int main() {
 
     temp_surface = IMG_Load("assets/mountain.png");
     tex.platform = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_FreeSurface(temp_surface);
+
+    temp_surface = IMG_Load("assets/blank.png");
+    tex.blank = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
     temp_surface = IMG_Load("assets/player/sword.png");
@@ -631,7 +698,7 @@ int main() {
     SDL_FreeSurface(temp_surface);
 
     player_swoosh = IMG_Load("assets/player/swoosh.png");
-    dummy_swoosh  = IMG_Load("assets/player/swoosh.png");
+    enemy_swoosh  = IMG_Load("assets/player/swoosh.png");
 
     // TODO this isn't used yet... Will it ever be?
     temp_surface = IMG_Load("assets/ui/gridcell.png");
@@ -659,7 +726,7 @@ int main() {
 
     // ====================== Initialize Things That Do Stuff ======================
     Player player(renderer, player_surface, player_swoosh, &tex, &sfx, 0);
-    Player enemy(renderer, dummy_surface, dummy_swoosh, &tex, &sfx, 0xFF6984AD);
+    Player enemy(renderer, enemy_surface, enemy_swoosh, &tex, &sfx, 0xFF6984AD);
     enemy.cell_x = 6;
     enemy.flipped = true;
 
@@ -684,6 +751,8 @@ int main() {
 
     bool player_was_dead = false;
     bool enemy_was_dead = false;
+    bool fading_in_blank = false;
+    bool fading_out_blank = false;
 
     while (true) {
         // ============= Frame Setup =================
@@ -735,19 +804,22 @@ int main() {
         else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
 
         // ========================== Game Logic =====================
-        ai_function(&enemy, &player, ai_data);
-        player.update();
-        enemy.update();
-        collide_players(&player, &enemy, &sfx);
-        if (player.dead && !player_was_dead) {
-            Mix_PlayMusic(music.death, 0);
-            enemy.win();
-            player_was_dead = true;
-        }
-        if (enemy.dead && !enemy_was_dead) {
-            OutputDebugString("OMG U KILL THEM\n");
-            player.win();
-            enemy_was_dead = true;
+        if (!(fading_in_blank || fading_out_blank)) {
+            ai_function(&enemy, &player, ai_data);
+            player.update();
+            enemy.update();
+            collide_players(&player, &enemy, &sfx);
+
+            if (player.dead && !player_was_dead) {
+                Mix_PlayMusic(music.death, 0);
+                enemy.win();
+                player_was_dead = true;
+            }
+            if (enemy.dead && !enemy_was_dead) {
+                OutputDebugString("OMG U KILL THEM\n");
+                player.win();
+                enemy_was_dead = true;
+            }
         }
 
         // ====================== Postmortem Control Logic ==============
