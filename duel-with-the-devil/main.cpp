@@ -5,7 +5,12 @@
 #endif
 
 #include <stdio.h>
-#ifdef _WIN32
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#include "SDL.h"
+#include "SDL_image.h"
+#include "SDL/SDL_mixer.h"
+#elif defined _WIN32
 #include "SDL/SDL.h"
 #include "SDL/SDL_image.h"
 #include "SDL/SDL_mixer.h"
@@ -156,6 +161,9 @@ struct Player {
 
         // Just overwrite the previous... Maybe do weights if there's time/incentive.
         training[x_dist][y_dist][other->current_action] = next_action;
+    }
+
+    Player() {
     }
 
     Player(SDL_Renderer* rend, SDL_Surface* surface, SDL_Surface* swoosh_surf, Textures* textures, Sounds* sounds, Uint32 color) {
@@ -1096,43 +1104,359 @@ bool any(bool controls[4]) {
     return controls[0] || controls[1] || controls[2] || controls[3];
 }
 
+
+// Stuff for managing scene transitions
+bool player_was_dead;
+bool enemy_was_dead;
+int fade_timeout;
+bool fading_in_blank;
+bool fading_out_blank;
+int fade_alpha;
+
+Mix_Music* fade_music_to;
+Mix_Music* current_music;
+
+// Man this is getting insane
+bool played_death_music;
+bool boss_initialized;
+bool player_wins;
+
+bool player_just_moved;
+// Unfortunately, this control idea is tricky if we don't want the player to move twice
+// every time you press a button once...
+bool moved_from[4];
+
+Player player;
+Player enemy;
+
+// =============== SDL and asset stuff ==================
+SDL_Window* window;
+int window_width , window_height;
+SDL_Renderer* renderer;
+SDL_Surface* player_surface;
+SDL_Surface* player_swoosh;
+SDL_Surface* enemy_surface;
+SDL_Surface* enemy_swoosh;
+SDL_Surface* temp_surface;
+Textures tex;
+Musics music;
+Sounds sfx;
+bool last_controls[4];
+bool controls[4];
+Cloud clouds[NUM_CLOUDS];
+void(*stages[])(Player*, Player*, void*) = {
+    dummy_ai, patrol_ai, berserk_ai, slickster_ai, sneaky_ai,
+    observant_ai, sentinel_ai, neural_ai
+};
+int stage;
+void(*ai_function)(Player*, Player*, void*);
+void* ai_data;
+
+// ============ Stuff for game loop management ===============
+SDL_Event event;
+Uint64 milliseconds_per_tick;
+int key_count;
+const Uint8* keys = SDL_GetKeyboardState(&key_count);
+// If we press and release a key while player is still cooling down from movement, we
+// want to use that key.
+Actions reserve_action = UNSPECIFIED;
+bool keys_pressed_since_move[4];
+
+void loop() {
+    // ============= Frame Setup =================
+    Uint64 frame_start = SDL_GetPerformanceCounter();
+
+    while (SDL_PollEvent(&event)) {
+        switch (event.type) {
+        case SDL_QUIT: exit(0); break;
+        }
+    }
+
+    // ====================== Input Processing / Control Logic ========================
+    controls[UP]    = keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W];
+    controls[DOWN]  = keys[SDL_SCANCODE_DOWN]  || keys[SDL_SCANCODE_S];
+    controls[LEFT]  = keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A];
+    controls[RIGHT] = keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D];
+
+    if (moved_from[UP] && !controls[UP]) moved_from[UP] = false;
+    if (moved_from[DOWN] && !controls[DOWN]) controls[DOWN] = false;
+    if (moved_from[LEFT] && !controls[LEFT]) controls[LEFT] = false;
+    if (moved_from[RIGHT] && !controls[RIGHT]) controls[RIGHT] = false;
+
+    if (player.moved && player.frame_counter > 0) {
+        if (keys_pressed_since_move[RIGHT]) {
+            if (keyreleased(RIGHT)) reserve_action = GO_RIGHT;
+        }
+        else keys_pressed_since_move[RIGHT] = keypressed(RIGHT);
+
+        if (keys_pressed_since_move[LEFT]) {
+            if (keyreleased(LEFT)) reserve_action = GO_LEFT;
+        }
+        else keys_pressed_since_move[LEFT] = keypressed(LEFT);
+
+        if (keys_pressed_since_move[UP]) {
+            if (keyreleased(UP)) reserve_action = GO_UP;
+        }
+        else keys_pressed_since_move[UP] = keypressed(UP);
+
+        if (keys_pressed_since_move[DOWN]) {
+            if (keyreleased(DOWN)) reserve_action = GO_DOWN;
+        }
+        else keys_pressed_since_move[DOWN] = keypressed(DOWN);
+    }
+
+    if      (controls[RIGHT] && !moved_from[RIGHT]) player.next_action = GO_RIGHT;
+    else if (controls[LEFT]  && !moved_from[LEFT])  player.next_action = GO_LEFT;
+    else if (controls[UP]    && !moved_from[UP])    player.next_action = GO_UP;
+    else if (controls[DOWN]  && !moved_from[DOWN])  player.next_action = GO_DOWN;
+    else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
+
+    if (!enemy.devil && player.action_timeout == 1) player.train_against(&enemy);
+
+    // ========================== Game Logic =====================
+    if (!fading_out_blank) {
+        ai_function(&enemy, &player, ai_data);
+        player.update();
+        enemy.update();
+        collide_players(&player, &enemy, &sfx);
+
+        if (player.dead && !player_was_dead) {
+            Mix_PlayChannel(7, sfx.kill, 0);
+            if (!enemy.boss) {
+                Mix_PlayMusic(music.death, 0);
+                played_death_music = true;
+            }
+            enemy.win();
+            player_was_dead = true;
+
+            if (stage < sizeof(stages) / sizeof(void*) - 1)
+                stage -= 1;
+            fade_timeout = 60;
+        }
+        if (enemy.dead && !enemy_was_dead) {
+            Mix_PlayChannel(7, sfx.kill, 0);
+            player.win();
+            enemy_was_dead = true;
+
+            if (stage == 7) {
+                if (enemy.boss) {
+                    player_wins = true;
+                    Mix_PlayMusic(music.gameover, 0);
+                }
+                else {
+                    enemy.boss = true;
+                }
+            }
+            else stage += 1;
+
+            fade_timeout = 60;
+        }
+    }
+    if (fade_timeout > 0) {
+        fade_timeout -= 1;
+        if (fade_timeout == 0) fading_in_blank = true;
+    }
+
+    // ====================== Postmortem Control Logic ==============
+    if (player.moved) {
+        if (player.frame_counter == 0) {
+            player_just_moved = true;
+            memset(moved_from, 0, sizeof(moved_from));
+            int key_from_action = player.current_action - 1;
+            if (key_from_action >= 0 && key_from_action < sizeof(keys))
+                moved_from[key_from_action] = true;
+
+            reserve_action = UNSPECIFIED;
+            memset(keys_pressed_since_move, 0, sizeof(keys_pressed_since_move));
+        }
+    }
+    else if (player_just_moved) {
+        memset(moved_from, 0, sizeof(moved_from));
+    }
+
+    // ====================== Render ========================
+    SDL_RenderClear(renderer);
+
+    SDL_RenderCopy(renderer, tex.background, NULL, NULL);
+    for (int i = 0; i < NUM_CLOUDS / 2; i++)
+        clouds[i].render(renderer);
+
+    SDL_RenderCopy(renderer, tex.platform, NULL, NULL);
+
+    player.render(renderer);
+    enemy.render(renderer);
+
+    for (int i = NUM_CLOUDS / 2; i < NUM_CLOUDS; i++)
+        clouds[i].render(renderer);
+
+    if (fading_in_blank) {
+        fade_alpha += player_wins ? (rand() % 10 > 4 ? 1 : 0) : 2;
+        if (fade_alpha > 255) {
+            SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+
+            // Keep incrementing alpha just so we don't have to hack in another timer lol...
+            if (fade_alpha >= enemy.boss ? 300 : 260) {
+                // Re-initialize shit
+                reserve_action = UNSPECIFIED;
+                ai_function = stages[stage];
+                memset(ai_data, 0, 128);
+                player.initialize();
+                enemy.initialize();
+                enemy.cell_x = 6;
+                enemy.flipped = true;
+                player_was_dead = false;
+                enemy_was_dead = false;
+
+                fade_alpha = 255;
+                fading_in_blank = false;
+                fading_out_blank = true;
+
+                if (played_death_music) {
+                    Mix_PlayMusic(current_music, -1);
+                    played_death_music = false;
+                }
+                else if (stage == 4 && !player.devil) {
+                    // Intense music
+                    fade_music_to = music.ominous2;
+
+                    // Red sky
+                    SDL_DestroyTexture(tex.background);
+                    temp_surface = IMG_Load("assets/redsky.png");
+                    tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
+                    SDL_FreeSurface(temp_surface);
+
+                    // Faster clouds
+                    for (int i = 0; i < NUM_CLOUDS; i++)
+                        clouds[i].speed += 7;
+
+                    player.devil = true;
+
+                    enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFFFFE4BE);
+                }
+                else if (stage == 7 && !enemy.devil) {
+                    fade_music_to = music.dark;
+                    enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFF1D00FF);
+                    enemy.devil = true;
+                }
+                else if (enemy.boss && !boss_initialized) {
+                    fade_music_to = music.boss;
+
+                    // Load up the big man skin.
+                    SDL_FreeSurface(enemy_surface);
+                    SDL_FreeSurface(enemy_swoosh);
+                    enemy_surface = IMG_Load("assets/player/boss.png");
+                    enemy_swoosh = IMG_Load("assets/player/boss_swoosh.png");
+                    enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0);
+                    enemy.horns_tex = tex.boss_horns;
+
+                    // Final sky.
+                    SDL_DestroyTexture(tex.background);
+                    temp_surface = IMG_Load("assets/finalsky.png");
+                    tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
+                    SDL_FreeSurface(temp_surface);
+
+                    // Final mountain.
+                    SDL_DestroyTexture(tex.platform);
+                    temp_surface = IMG_Load("assets/finalmountain.png");
+                    tex.platform = SDL_CreateTextureFromSurface(renderer, temp_surface);
+                    SDL_FreeSurface(temp_surface);
+
+                    // FASTER CLOUDS LETS GO.
+                    for (int i = 0; i < NUM_CLOUDS; i++)
+                        clouds[i].speed = 10;
+
+                    ai_function = boss_ai;
+
+                    boss_initialized = true;
+                }
+                else if (player_wins) {
+                    fade_alpha = 256;
+                }
+            }
+        }
+        else {
+            SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
+            SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+        }
+    }
+    else if (fading_out_blank) {
+        if (player_wins) {
+            if (fade_alpha > 255) {
+                fade_alpha = 0;
+            }
+            if (fade_alpha != 255 && rand() % 10 > 6)
+                fade_alpha += 1;
+
+            SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+            SDL_SetTextureAlphaMod(tex.thanks_for_playing, fade_alpha);
+            SDL_RenderCopy(renderer, tex.thanks_for_playing, NULL, NULL);
+        }
+        else {
+            fade_alpha -= enemy.boss ? 4 : 2;
+            if (fade_alpha <= 0) {
+                fade_alpha = 0;
+                fading_out_blank = false;
+            }
+            SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
+            SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+        }
+    }
+
+    SDL_RenderPresent(renderer);
+
+    memcpy(&last_controls, &controls, sizeof(controls));
+
+    // ===================== Handle Music Transition =================
+    if (fade_music_to) {
+        if (current_music) {
+            Mix_FadeOutMusic(boss_initialized ? 100 : 500);
+            current_music = NULL;
+        }
+        else if (!Mix_PlayingMusic()) {
+            current_music = fade_music_to;
+            Mix_FadeInMusic(current_music, -1, boss_initialized ? 100 : 500);
+            fade_music_to = NULL;
+        }
+    }
+
+    // ======================= Cap Framerate =====================
+    Uint64 frame_end = SDL_GetPerformanceCounter();
+    Uint64 frame_ms = (frame_end - frame_start) * milliseconds_per_tick;
+
+    if (frame_ms < 17)
+        SDL_Delay(17 - frame_ms);
+}
+
+#define exit(x) { printf("EXITING WITH CODE %i\n", x); exit(x); }
+
 #ifdef _WIN32
 int WinMain(HINSTANCE hinst, HINSTANCE prev, LPSTR cmdline, int cmdshow) {
 #else
 int main() {
 #endif
-    // =============== SDL and asset stuff ==================
-    SDL_Window* window;
-    int window_width = 720, window_height = 512;
-    SDL_Renderer* renderer;
-    SDL_Surface* player_surface;
-    SDL_Surface* player_swoosh;
-    SDL_Surface* enemy_surface;
-    SDL_Surface* enemy_swoosh;
-    SDL_Surface* temp_surface;
-    Textures tex;
-    Musics music;
-    Sounds sfx;
-    bool last_controls[4];
-    bool controls[4];
-    Cloud clouds[NUM_CLOUDS];
-    void(*stages[])(Player*, Player*, void*) = {
-        dummy_ai, patrol_ai, berserk_ai, slickster_ai, sneaky_ai,
-        observant_ai, sentinel_ai, neural_ai
-    };
-    int stage = 0;
-    void(*ai_function)(Player*, Player*, void*) = stages[stage];
-    void* ai_data = calloc(128, 1);
-
-    if (!SDL_Init(SDL_INIT_AUDIO) == -1) { exit(1); }
-    if (Mix_Init(MIX_INIT_OGG) & MIX_INIT_OGG != MIX_INIT_OGG) { exit(2); }
+    if (SDL_Init(SDL_INIT_AUDIO) < 0) { exit(1); }
+    if (SDL_Init(SDL_INIT_VIDEO) < 0) { exit(99); }
+    if (SDL_GetNumAudioDrivers() == 0) { printf("No fuckin' audio drivers\n"); }
+    printf("Audio drivers: %s, %s, %s\n", SDL_GetAudioDriver(0), SDL_GetAudioDriver(1), SDL_GetAudioDriver(2));
+    if ((Mix_Init(MIX_INIT_OGG) & MIX_INIT_OGG) != MIX_INIT_OGG) { exit(2); }
     Mix_AllocateChannels(15);
+
+    FILE* f = fopen("assets/test.txt", "r");
+    char word[60];
+    fscanf(f, "%s", word);
+    printf("OK`: %s\n", word);
+    fclose(f);
 
     window = SDL_CreateWindow(
         "A Duel With the Devil",
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
         window_width, window_height, 0
     );
+    if (!window) {
+        printf("Window puked :(\n");
+        exit(98);
+    }
+    else printf("uhhh we're in?\n");
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     SDL_SetRenderDrawColor(renderer, 165, 226, 216, 255);
 
@@ -1198,311 +1522,59 @@ int main() {
     sfx.kill   = Mix_LoadWAV("assets/sfx/kill.wav");
 
     // ====================== Initialize Things That Do Stuff ======================
-    Player player(renderer, player_surface, player_swoosh, &tex, &sfx, 0);
+    Player tempplr(renderer, player_surface, player_swoosh, &tex, &sfx, 0);
+    Player tempenm(renderer, enemy_surface, enemy_swoosh, &tex, &sfx, 0xFF6984AD);
+    memcpy(&player, &tempplr, sizeof(Player));
+    memcpy(&enemy, &tempenm, sizeof(Player));
+
     player.initialize_training_data();
-    Player enemy(renderer, enemy_surface, enemy_swoosh, &tex, &sfx, 0xFF6984AD);
     enemy.cell_x = 6;
     enemy.flipped = true;
 
     for (int i = 0; i < NUM_CLOUDS; i++)
         clouds[i].initialize(window_width, window_height, tex.cloud);
 
-    // ============ Stuff for game loop management ===============
-    SDL_Event event;
-    Uint64 milliseconds_per_tick = 1000 / SDL_GetPerformanceFrequency();
-    int key_count;
-    const Uint8* keys = SDL_GetKeyboardState(&key_count);
-    // If we press and release a key while player is still cooling down from movement, we
-    // want to use that key.
-    Actions reserve_action = UNSPECIFIED;
-    bool keys_pressed_since_move[4];
     memset(keys_pressed_since_move, 0, sizeof(keys));
-    // Unfortunately, this control idea is tricky if we don't want the player to move twice
-    // every time you press a button once...
-    bool moved_from[4];
     memset(moved_from, 0, sizeof(moved_from));
-    bool player_just_moved = false;
 
-    // Stuff for managing scene transitions
-    bool player_was_dead = false;
-    bool enemy_was_dead = false;
-    int fade_timeout = 0;
-    bool fading_in_blank = false;
-    bool fading_out_blank = false;
-    int fade_alpha = 0;
+    // === INITIALIZING GARBAGE ===
 
-    Mix_Music* fade_music_to = NULL;
-    Mix_Music* current_music = music.ominous;
+    player_was_dead = false;
+    enemy_was_dead = false;
+    fade_timeout = 0;
+    fading_in_blank = false;
+    fading_out_blank = false;
+    fade_alpha = 0;
+
+    fade_music_to = NULL;
+    current_music = music.ominous;
 
     // Man this is getting insane
-    bool played_death_music = false;
-    bool boss_initialized = false;
-    bool player_wins = false;
+    played_death_music = false;
+    boss_initialized = false;
+    player_wins = false;
 
-    while (true) {
-        // ============= Frame Setup =================
-        Uint64 frame_start = SDL_GetPerformanceCounter();
+    player_just_moved = false;
 
-        while (SDL_PollEvent(&event)) {
-            switch (event.type) {
-            case SDL_QUIT: exit(0); break;
-            }
-        }
+    // =============== SDL and asset stuff ==================
+    window_width = 720;
+    window_height = 512;
+    stage = 0;
+    ai_function = stages[stage];
+    ai_data = calloc(128, 1);
 
-        // ====================== Input Processing / Control Logic ========================
-        controls[UP]    = keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W];
-        controls[DOWN]  = keys[SDL_SCANCODE_DOWN]  || keys[SDL_SCANCODE_S];
-        controls[LEFT]  = keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A];
-        controls[RIGHT] = keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D];
 
-        if (moved_from[UP] && !controls[UP]) moved_from[UP] = false;
-        if (moved_from[DOWN] && !controls[DOWN]) controls[DOWN] = false;
-        if (moved_from[LEFT] && !controls[LEFT]) controls[LEFT] = false;
-        if (moved_from[RIGHT] && !controls[RIGHT]) controls[RIGHT] = false;
+    // ============ Stuff for game loop management ===============
+    milliseconds_per_tick = 1000 / SDL_GetPerformanceFrequency();
+    // keys = SDL_GetKeyboardState(&key_count);
 
-        if (player.moved && player.frame_counter > 0) {
-            if (keys_pressed_since_move[RIGHT]) {
-                if (keyreleased(RIGHT)) reserve_action = GO_RIGHT;
-            }
-            else keys_pressed_since_move[RIGHT] = keypressed(RIGHT);
+    // If we press and release a key while player is still cooling down from movement, we
+    // want to use that key.
+    reserve_action = UNSPECIFIED;
 
-            if (keys_pressed_since_move[LEFT]) {
-                if (keyreleased(LEFT)) reserve_action = GO_LEFT;
-            }
-            else keys_pressed_since_move[LEFT] = keypressed(LEFT);
+    printf("Error? %s\n", SDL_GetError());
 
-            if (keys_pressed_since_move[UP]) {
-                if (keyreleased(UP)) reserve_action = GO_UP;
-            }
-            else keys_pressed_since_move[UP] = keypressed(UP);
+    emscripten_set_main_loop(loop, 0, 1);
 
-            if (keys_pressed_since_move[DOWN]) {
-                if (keyreleased(DOWN)) reserve_action = GO_DOWN;
-            }
-            else keys_pressed_since_move[DOWN] = keypressed(DOWN);
-        }
-
-        if      (controls[RIGHT] && !moved_from[RIGHT]) player.next_action = GO_RIGHT;
-        else if (controls[LEFT]  && !moved_from[LEFT])  player.next_action = GO_LEFT;
-        else if (controls[UP]    && !moved_from[UP])    player.next_action = GO_UP;
-        else if (controls[DOWN]  && !moved_from[DOWN])  player.next_action = GO_DOWN;
-        else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
-
-        if (!enemy.devil && player.action_timeout == 1) player.train_against(&enemy);
-
-        // ========================== Game Logic =====================
-        if (!fading_out_blank) {
-            ai_function(&enemy, &player, ai_data);
-            player.update();
-            enemy.update();
-            collide_players(&player, &enemy, &sfx);
-
-            if (player.dead && !player_was_dead) {
-                Mix_PlayChannel(7, sfx.kill, 0);
-                if (!enemy.boss) {
-                    Mix_PlayMusic(music.death, 0);
-                    played_death_music = true;
-                }
-                enemy.win();
-                player_was_dead = true;
-
-                if (stage < sizeof(stages) / sizeof(void*) - 1)
-                    stage -= 1;
-                fade_timeout = 60;
-            }
-            if (enemy.dead && !enemy_was_dead) {
-                Mix_PlayChannel(7, sfx.kill, 0);
-                player.win();
-                enemy_was_dead = true;
-
-                if (stage == 7) {
-                    if (enemy.boss) {
-                        player_wins = true;
-                        Mix_PlayMusic(music.gameover, 0);
-                    }
-                    else {
-                        enemy.boss = true;
-                    }
-                }
-                else stage += 1;
-
-                fade_timeout = 60;
-            }
-        }
-        if (fade_timeout > 0) {
-            fade_timeout -= 1;
-            if (fade_timeout == 0) fading_in_blank = true;
-        }
-
-        // ====================== Postmortem Control Logic ==============
-        if (player.moved) {
-            if (player.frame_counter == 0) {
-                player_just_moved = true;
-                memset(moved_from, 0, sizeof(moved_from));
-                int key_from_action = player.current_action - 1;
-                if (key_from_action >= 0 && key_from_action < sizeof(keys))
-                    moved_from[key_from_action] = true;
-
-                reserve_action = UNSPECIFIED;
-                memset(keys_pressed_since_move, 0, sizeof(keys_pressed_since_move));
-            }
-        }
-        else if (player_just_moved) {
-            memset(moved_from, 0, sizeof(moved_from));
-        }
-
-        // ====================== Render ========================
-        SDL_RenderClear(renderer);
-
-        SDL_RenderCopy(renderer, tex.background, NULL, NULL);
-        for (int i = 0; i < NUM_CLOUDS / 2; i++)
-            clouds[i].render(renderer);
-
-        SDL_RenderCopy(renderer, tex.platform, NULL, NULL);
-
-        player.render(renderer);
-        enemy.render(renderer);
-
-        for (int i = NUM_CLOUDS / 2; i < NUM_CLOUDS; i++)
-            clouds[i].render(renderer);
-
-        if (fading_in_blank) {
-            fade_alpha += player_wins ? (rand() % 10 > 4 ? 1 : 0) : 2;
-            if (fade_alpha > 255) {
-                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
-
-                // Keep incrementing alpha just so we don't have to hack in another timer lol...
-                if (fade_alpha >= enemy.boss ? 300 : 260) {
-                    // Re-initialize shit
-                    reserve_action = UNSPECIFIED;
-                    ai_function = stages[stage];
-                    memset(ai_data, 0, 128);
-                    player.initialize();
-                    enemy.initialize();
-                    enemy.cell_x = 6;
-                    enemy.flipped = true;
-                    player_was_dead = false;
-                    enemy_was_dead = false;
-
-                    fade_alpha = 255;
-                    fading_in_blank = false;
-                    fading_out_blank = true;
-
-                    if (played_death_music) {
-                        Mix_PlayMusic(current_music, -1);
-                        played_death_music = false;
-                    }
-                    else if (stage == 4 && !player.devil) {
-                        // Intense music
-                        fade_music_to = music.ominous2;
-
-                        // Red sky
-                        SDL_DestroyTexture(tex.background);
-                        temp_surface = IMG_Load("assets/redsky.png");
-                        tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
-                        SDL_FreeSurface(temp_surface);
-
-                        // Faster clouds
-                        for (int i = 0; i < NUM_CLOUDS; i++)
-                            clouds[i].speed += 7;
-
-                        player.devil = true;
-
-                        enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFFFFE4BE);
-                    }
-                    else if (stage == 7 && !enemy.devil) {
-                        fade_music_to = music.dark;
-                        enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFF1D00FF);
-                        enemy.devil = true;
-                    }
-                    else if (enemy.boss && !boss_initialized) {
-                        fade_music_to = music.boss;
-
-                        // Load up the big man skin.
-                        SDL_FreeSurface(enemy_surface);
-                        SDL_FreeSurface(enemy_swoosh);
-                        enemy_surface = IMG_Load("assets/player/boss.png");
-                        enemy_swoosh = IMG_Load("assets/player/boss_swoosh.png");
-                        enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0);
-                        enemy.horns_tex = tex.boss_horns;
-
-                        // Final sky.
-                        SDL_DestroyTexture(tex.background);
-                        temp_surface = IMG_Load("assets/finalsky.png");
-                        tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
-                        SDL_FreeSurface(temp_surface);
-
-                        // Final mountain.
-                        SDL_DestroyTexture(tex.platform);
-                        temp_surface = IMG_Load("assets/finalmountain.png");
-                        tex.platform = SDL_CreateTextureFromSurface(renderer, temp_surface);
-                        SDL_FreeSurface(temp_surface);
-
-                        // FASTER CLOUDS LETS GO.
-                        for (int i = 0; i < NUM_CLOUDS; i++)
-                            clouds[i].speed = 10;
-
-                        ai_function = boss_ai;
-
-                        boss_initialized = true;
-                    }
-                    else if (player_wins) {
-                        fade_alpha = 256;
-                    }
-                }
-            }
-            else {
-                SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
-                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
-            }
-        }
-        else if (fading_out_blank) {
-            if (player_wins) {
-                if (fade_alpha > 255) {
-                    fade_alpha = 0;
-                }
-                if (fade_alpha != 255 && rand() % 10 > 6)
-                    fade_alpha += 1;
-
-                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
-                SDL_SetTextureAlphaMod(tex.thanks_for_playing, fade_alpha);
-                SDL_RenderCopy(renderer, tex.thanks_for_playing, NULL, NULL);
-            }
-            else {
-                fade_alpha -= enemy.boss ? 4 : 2;
-                if (fade_alpha <= 0) {
-                    fade_alpha = 0;
-                    fading_out_blank = false;
-                }
-                SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
-                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
-            }
-        }
-
-        SDL_RenderPresent(renderer);
-
-        memcpy(&last_controls, &controls, sizeof(controls));
-
-        // ===================== Handle Music Transition =================
-        if (fade_music_to) {
-            if (current_music) {
-                Mix_FadeOutMusic(boss_initialized ? 100 : 500);
-                current_music = NULL;
-            }
-            else if (!Mix_PlayingMusic()) {
-                current_music = fade_music_to;
-                Mix_FadeInMusic(current_music, -1, boss_initialized ? 100 : 500);
-                fade_music_to = NULL;
-            }
-        }
-
-        // ======================= Cap Framerate =====================
-        Uint64 frame_end = SDL_GetPerformanceCounter();
-        Uint64 frame_ms = (frame_end - frame_start) * milliseconds_per_tick;
-
-        if (frame_ms < 17)
-            SDL_Delay(17 - frame_ms);
-    }
-
-	return 0;
+    return 0;
 }
