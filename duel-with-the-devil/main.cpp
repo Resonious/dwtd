@@ -43,6 +43,7 @@ struct Textures {
     SDL_Texture* grid_cell;
     SDL_Texture* cloud;
     SDL_Texture* boss_horns;
+    SDL_Texture* thanks_for_playing;
 };
 
 struct Musics {
@@ -51,6 +52,7 @@ struct Musics {
     Mix_Music* dark;
     Mix_Music* death;
     Mix_Music* boss;
+    Mix_Music* gameover;
 };
 
 struct Sounds {
@@ -671,7 +673,7 @@ void patrol_ai(Player* player, Player* other_player, void* rawdata) {
                 }
                 else player->next_action = GO_LEFT;
             }
-            data->timer = 50;
+            data->timer = 29;
         }
     }
 }
@@ -702,7 +704,7 @@ void berserk_ai(Player* player, Player* other_player, void* rawdata) {
         case 0:
             player->next_action = GO_LEFT;
             data->step = 1;
-            data->timer = 50;
+            data->timer = 35;
             break;
 
         case 1:
@@ -889,8 +891,8 @@ void observant_ai(Player* player, Player* other_player, void* rawdata) {
         data->timer = 14;
     }
     else if (data->realign) {
-        if (player->cell_x > other_player->cell_x) player->next_action = GO_RIGHT;
-        else player->next_action = GO_LEFT;
+        if (player->cell_x > other_player->cell_x) player->next_action = GO_LEFT;
+        else player->next_action = GO_RIGHT;
         data->realign = false;
         data->timer = 14;
     }
@@ -937,7 +939,7 @@ void sneaky_ai(Player* player, Player* other_player, void* rawdata) {
     else if (data->finish_them) {
         if (player->cell_x > other_player->cell_x) player->next_action = GO_LEFT;
         else player->next_action = GO_RIGHT;
-        data->timer = 60;
+        data->timer = 48;
         data->finish_them = false;
     }
     else if (abs(player->cell_x - other_player->cell_x) % 2 == 0) {
@@ -1012,6 +1014,76 @@ void neural_ai(Player* player, Player* other_player, void* rawdata) {
             else
                 player->next_action = GO_LEFT;
             data->timer = 60;
+        }
+    }
+}
+
+// ======================= Boss: This is it!!! =========================
+void boss_ai(Player* player, Player* other_player, void* rawdata) {
+    struct BossAi {
+        Uint8 initialized;
+        int timer;
+    };
+    BossAi* data = (BossAi*)rawdata;
+
+    if (data->timer % 3 == 0) {
+        if (abs(other_player->cell_x - player->cell_x) <= 1) {
+            data->timer = 0;
+        }
+    }
+
+    if (data->timer > 0) {
+        data->timer -= 1;
+        return;
+    }
+
+    int dist = abs(other_player->cell_x - player->cell_x);
+    if (dist <= 2) {
+        if (dist == 1 && (other_player->next_action == GO_LEFT || other_player->next_action == GO_RIGHT)) {
+            if (other_player->previous_action == GO_UP)
+                    if (player->cell_x < other_player->cell_x)
+                        player->next_action = GO_RIGHT;
+                    else
+                        player->next_action = GO_LEFT;
+            else
+                player->next_action = GO_DOWN;
+            data->timer = 6;
+        }
+        else if (other_player->next_action == GO_UP) {
+            player->next_action = GO_UP;
+        }
+        else {
+            player->next_action = other_player->predict_action_from(player);
+            if (player->next_action == UNSPECIFIED) {
+                if (player->current_action != GO_DOWN && rand() % 10 > 5)
+                    player->next_action = GO_DOWN;
+                else {
+                    if (player->cell_x < other_player->cell_x)
+                        player->next_action = GO_RIGHT;
+                    else
+                        player->next_action = GO_LEFT;
+                }
+            }
+            else {
+                if (player->cell_x <= 1 && player->next_action == GO_LEFT)
+                    player->next_action = GO_RIGHT;
+                else if (player->cell_x >= 6 && player->next_action == GO_RIGHT)
+                    player->next_action = GO_LEFT;
+            }
+            data->timer = 6;
+        }
+    }
+    else {
+        if (player->current_action != GO_UP && rand() % 10 > 3) {
+            player->next_action = GO_UP;
+            data->timer = 14;
+        }
+        else {
+            if (player->cell_x < other_player->cell_x)
+                player->next_action = GO_RIGHT;
+            else
+                player->next_action = GO_LEFT;
+            data->timer = rand() % 10 > 7 ? 14 : 60;
         }
     }
 }
@@ -1095,6 +1167,10 @@ int main() {
     tex.boss_horns = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
+    temp_surface = IMG_Load("assets/thanksforplaying.png");
+    tex.thanks_for_playing = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_FreeSurface(temp_surface);
+
     player_swoosh = IMG_Load("assets/player/swoosh.png");
     enemy_swoosh  = IMG_Load("assets/player/swoosh.png");
 
@@ -1110,6 +1186,7 @@ int main() {
     music.dark     = Mix_LoadMUS("assets/music/dark.ogg");
     music.death    = Mix_LoadMUS("assets/music/death.ogg");
     music.boss     = Mix_LoadMUS("assets/music/finalboss.ogg");
+    music.gameover = Mix_LoadMUS("assets/music/gameover.ogg");
     Mix_PlayMusic(music.ominous, -1);
 
     sfx.move   = Mix_LoadWAV("assets/sfx/move.wav");
@@ -1159,8 +1236,8 @@ int main() {
 
     // Man this is getting insane
     bool played_death_music = false;
-
     bool boss_initialized = false;
+    bool player_wins = false;
 
     while (true) {
         // ============= Frame Setup =================
@@ -1222,8 +1299,10 @@ int main() {
 
             if (player.dead && !player_was_dead) {
                 Mix_PlayChannel(7, sfx.kill, 0);
-                Mix_PlayMusic(music.death, 0);
-                played_death_music = true;
+                if (!enemy.boss) {
+                    Mix_PlayMusic(music.death, 0);
+                    played_death_music = true;
+                }
                 enemy.win();
                 player_was_dead = true;
 
@@ -1238,7 +1317,8 @@ int main() {
 
                 if (stage == 7) {
                     if (enemy.boss) {
-                        // TODO U WIN
+                        player_wins = true;
+                        Mix_PlayMusic(music.gameover, 0);
                     }
                     else {
                         enemy.boss = true;
@@ -1287,7 +1367,7 @@ int main() {
             clouds[i].render(renderer);
 
         if (fading_in_blank) {
-            fade_alpha += 2;
+            fade_alpha += player_wins ? (rand() % 10 > 4 ? 1 : 0) : 2;
             if (fade_alpha > 255) {
                 SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
 
@@ -1313,7 +1393,7 @@ int main() {
                         played_death_music = false;
                     }
                     else if (stage == 4 && !player.devil) {
-                        // Intense(er) music
+                        // Intense music
                         fade_music_to = music.ominous2;
 
                         // Red sky
@@ -1352,14 +1432,22 @@ int main() {
                         tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
                         SDL_FreeSurface(temp_surface);
 
+                        // Final mountain.
+                        SDL_DestroyTexture(tex.platform);
+                        temp_surface = IMG_Load("assets/finalmountain.png");
+                        tex.platform = SDL_CreateTextureFromSurface(renderer, temp_surface);
+                        SDL_FreeSurface(temp_surface);
+
                         // FASTER CLOUDS LETS GO.
                         for (int i = 0; i < NUM_CLOUDS; i++)
                             clouds[i].speed = 10;
 
-                        // TODO
-                        // ai_function = boss_ai ?
+                        ai_function = boss_ai;
 
                         boss_initialized = true;
+                    }
+                    else if (player_wins) {
+                        fade_alpha = 256;
                     }
                 }
             }
@@ -1369,13 +1457,26 @@ int main() {
             }
         }
         else if (fading_out_blank) {
-            fade_alpha -= enemy.boss ? 4 : 2;
-            if (fade_alpha <= 0) {
-                fade_alpha = 0;
-                fading_out_blank = false;
+            if (player_wins) {
+                if (fade_alpha > 255) {
+                    fade_alpha = 0;
+                }
+                if (fade_alpha != 255 && rand() % 10 > 6)
+                    fade_alpha += 1;
+
+                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+                SDL_SetTextureAlphaMod(tex.thanks_for_playing, fade_alpha);
+                SDL_RenderCopy(renderer, tex.thanks_for_playing, NULL, NULL);
             }
-            SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
-            SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+            else {
+                fade_alpha -= enemy.boss ? 4 : 2;
+                if (fade_alpha <= 0) {
+                    fade_alpha = 0;
+                    fading_out_blank = false;
+                }
+                SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
+                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+            }
         }
 
         SDL_RenderPresent(renderer);
