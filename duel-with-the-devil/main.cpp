@@ -27,17 +27,44 @@
 // Oh god a global. Sue me.
 int scale = 2;
 
-void ChangeColorTo(SDL_Surface* surface, Uint32 color) {
+void ChangeColorTo(SDL_Surface* surface, Uint32 color, SDL_Rect* area) {
     if (surface->format->BytesPerPixel != 4) exit(5);
 
-    for (int x = 0; x < surface->w; x++) for (int y = 0; y < surface->h; y++)
+    int x_start, y_start, width, height;
+
+    if (area) {
+        x_start = area->x;
+        y_start = area->y;
+        width   = area->w;
+        height  = area->h;
+
+        if (x_start + width > surface->w)
+            width -= x_start + width - surface->w;
+        if (y_start + height > surface->w)
+            height -= y_start + height - surface->w;
+        if (x_start < 0)
+            x_start = 0;
+        if (y_start < 0)
+            y_start = 0;
+    }
+    else {
+        x_start = 0;
+        y_start = 0;
+        width = surface->w;
+        height = surface->h;
+    }
+
+    for (int x = x_start; x < x_start + width; x++) for (int y = y_start; y < y_start + height; y++)
     {
         Uint8* pixel_addr = (Uint8*)surface->pixels + y * surface->pitch + x * 4;
         Uint32 pixel = *((Uint32*)pixel_addr);
 
-        if (pixel != 0x00000000 && pixel != 0xFF808080)
+        if ((pixel >> (8*3)) == 0x000000FF && pixel != 0xFF808080)
             *(Uint32 *)pixel_addr = color;
     }
+}
+void ChangeColorTo(SDL_Surface* surface, Uint32 color) {
+    ChangeColorTo(surface, color, NULL);
 }
 
 struct Textures {
@@ -92,6 +119,7 @@ struct Player {
     Actions current_action, previous_action, next_action;
     // Cooldown between actions.
     int action_timeout;
+    int idle_speed;
     bool flipped;
     bool moved;
     bool falling;
@@ -124,6 +152,7 @@ struct Player {
         winner = false;
         killer = false;
         action_done = false;
+        idle_speed = 25;
     }
 
     // NOTE not even going to try and clean this up in the destructor.
@@ -229,7 +258,7 @@ struct Player {
         switch (current_action) {
         case NONE:
             if (frame < 2 || frame > 4) frame = 1;
-            if (frame_counter % 25 == 0) {
+            if (frame_counter % idle_speed == 0) {
                 frame += 1;
                 if (frame > 4) frame = 2;
             }
@@ -1102,7 +1131,8 @@ void boss_ai(Player* player, Player* other_player, void* rawdata) {
 #define keypressed(ctl) (!controls[ctl] && last_controls[ctl])
 #define NUM_CLOUDS 15
 
-#define HANDLE_PACKET(x) for (packet = peer->Receive(); packet; peer->DeallocatePacket(packet), packet = peer->Receive()) { switch (packet->data[0]) x }
+#define HANDLE_PACKET for (packet = peer->Receive(); packet; peer->DeallocatePacket(packet), packet = peer->Receive()) switch (packet->data[0])
+#define IS_HOSTING (mp_color != 0)
 
 #ifdef _WIN32
 int WinMain(HINSTANCE hinst, HINSTANCE prev, LPSTR cmdline, int cmdshow) {
@@ -1261,6 +1291,13 @@ int main() {
 
     Uint32 mp_color = 0;
     RakNet::SystemIndex mp_index = -1;
+    struct { RakNet::SystemIndex index; Uint32 color; } mp_hosts[10];
+    SDL_Surface* host_list_surf = NULL;
+    SDL_Texture* host_list_tex = NULL;
+    int host_list_timeout = 0;
+    Uint32 num_hosts;
+
+    bool started_multiplayer = false;
 
     // Hell yeah let's add more flags
     enum {
@@ -1291,7 +1328,7 @@ int main() {
         controls[RIGHT] = keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D];
 
         if (multiplayer_status != PLAYING) {
-            // ====================== Render ========================
+            // ====================== Multiplayer setup ========================
             SDL_RenderClear(renderer);
 
             SDL_RenderCopy(renderer, tex.background, NULL, NULL);
@@ -1322,7 +1359,7 @@ int main() {
                 // Draw "connecting to server" message
                 SDL_RenderCopy(renderer, tex.connecting_to_server, NULL, NULL);
 
-                HANDLE_PACKET({
+                HANDLE_PACKET {
                 case ID_CONNECTION_REQUEST_ACCEPTED:
                     OutputDebugString("Our connection request has been accepted.\n");
                     multiplayer_status = CONNECTED;
@@ -1331,18 +1368,48 @@ int main() {
 
                 default:
                     OutputDebugString("UNABLE TO CONNECT\n");
+                    peer->Connect("127.0.0.1", 3999, 0,0);
                     break;
-                })
+                }
 
                 break;
 
-            case CONNECTED:
+            case CONNECTED: {
                 // Draw "press h to host" message
                 SDL_RenderCopy(renderer, tex.press_h_to_host, NULL, NULL);
 
-                // TODO query and draw waiting client list?
+                // Ask for client list while we're at it.
+                if (host_list_timeout <= 0) {
+                    RakNet::BitStream color_req;
+                    color_req.Write((RakNet::MessageID)ID_QUERY_HOSTS);
+                    peer->Send(&color_req, HIGH_PRIORITY, RELIABLE_ORDERED, 0, server_addr, false);
 
-                // host on 'h' press lol
+                    host_list_timeout = 60 * 5;
+                }
+                else
+                    host_list_timeout -= 1;
+
+                // Check if user presses keys 1~0 and if there is a corrosponding player hosting
+                for (int k = 0; k < 10; k++) {
+                    int scancode = k + SDL_SCANCODE_1;
+                    if (keys[scancode] && k < num_hosts) {
+
+                        RakNet::BitStream join_req;
+                        join_req.Write((RakNet::MessageID)ID_JOIN_GAME);
+                        join_req.Write(mp_hosts[k].index);
+                        peer->Send(&join_req, HIGH_PRIORITY, RELIABLE_ORDERED, 0, server_addr, false);
+
+                        multiplayer_status = JOINING_GAME;
+                        enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, mp_hosts[k].color);
+                        player.cell_x = 1;
+                        player.flipped = false;
+                        player.idle_speed = 50;
+
+                        goto joined_game;
+                    }
+                }
+
+                // Host on 'h' press lol
                 if (keys[SDL_SCANCODE_H]) {
                     RakNet::BitStream color_req;
                     color_req.Write((RakNet::MessageID)ID_NEW_HOST);
@@ -1356,17 +1423,78 @@ int main() {
 
                     multiplayer_status = AWAITING_CLIENT;
                 }
-                break;
+                else {
+                    // Grab any host list updates
+                    HANDLE_PACKET { case ID_HOST_LIST: {
+                        RakNet::BitStream resp(packet->data, packet->length, false);
+                        resp.IgnoreBytes(sizeof(RakNet::MessageID));
 
-            case AWAITING_CLIENT:
-                // "awaiting client" message
-                SDL_RenderCopy(renderer, tex.awaiting_client, NULL, NULL);
+                        if (!resp.Read((char*)&num_hosts, sizeof(Uint32))) {
+                            OutputDebugString("FUCKED UP!!!"); break;
+                        }
+                        num_hosts = htonl(num_hosts);
 
-                if (mp_color != 0)
-                    player.render(renderer);
+                        if (num_hosts == 0) {
+                            OutputDebugString("No hosts");
+                            break;
+                        }
 
-                // RakNet::BitStream::GetNumberOfUnreadBits()
-                HANDLE_PACKET({
+                        SDL_Rect host_frame = {45 * 3, 0, 45, 45};
+                        SDL_Rect host_spot = {5, 15, 45, 45};
+                        if (host_list_surf != NULL) SDL_FreeSurface(host_list_surf);
+                        host_list_surf = IMG_Load("assets/empty.png");
+
+                        for (int i = 0; i < min(num_hosts, 10); i++) {
+                            if (
+                                !resp.Read((char*)&mp_hosts[i].index, sizeof(RakNet::SystemIndex))
+                                ||
+                                !resp.Read((char*)&mp_hosts[i].color, sizeof(Uint32))
+                            ) {
+                                OutputDebugString("FUCKED UP!!!");
+                                SDL_FreeSurface(host_list_surf);
+                                host_list_surf = NULL;
+                                break;
+                            }
+                            mp_hosts[i].index = htons(mp_hosts[i].index);
+                            mp_hosts[i].color = htonl(mp_hosts[i].color);
+
+                            SDL_BlitSurface(player_surface, &host_frame, host_list_surf, &host_spot);
+                            ChangeColorTo(host_list_surf, mp_hosts[i].color, &host_spot);
+
+                            if (i == 4) {
+                                host_spot.y = 15;
+                                host_spot.x += 45;
+                            }
+                            else
+                                host_spot.y += 45;
+                        }
+
+                        // Initialize or update host list texture
+                        if (host_list_surf != NULL) {
+                            if (host_list_tex == NULL)
+                                host_list_tex = SDL_CreateTextureFromSurface(renderer, host_list_surf);
+                            else
+                                SDL_UpdateTexture(host_list_tex, NULL, host_list_surf->pixels, host_list_surf->pitch);
+                        }
+                    }}
+
+                    // Draw hosts
+                    if (host_list_tex != NULL)
+                        SDL_RenderCopy(renderer, host_list_tex, NULL, NULL);
+                }
+            } break;
+
+            case AWAITING_CLIENT: case JOINING_GAME:
+            joined_game:
+                // "awaiting client" message (if necessary)
+                if (multiplayer_status == AWAITING_CLIENT)
+                    SDL_RenderCopy(renderer, tex.awaiting_client, NULL, NULL);
+
+                player.current_action = NONE;
+                player.assign_frame();
+                player.render(renderer);
+
+                HANDLE_PACKET {
                 case ID_REMOTE_DISCONNECTION_NOTIFICATION:
                     OutputDebugString("Another client has disconnected.\n");
                     break;
@@ -1374,21 +1502,38 @@ int main() {
                     OutputDebugString("Another client has lost the connection.\n");
                     break;
 
+                case ID_HOST_STILL_GOOD: {
+                    // Confirm we're still alive and interested in playing.
+                    RakNet::BitStream ready;
+                    ready.Write((RakNet::MessageID)ID_READY_TO_ROLL);
+                    peer->Send(&ready, HIGH_PRIORITY, RELIABLE_ORDERED, 0, server_addr, false);
+                } break;
+
+                case ID_READY_TO_ROLL:
+                    multiplayer_status = PLAYING;
+                    fading_in_blank = true;
+                    break;
+
                 case ID_ASSIGNED_COLOR: {
                     RakNet::BitStream in(packet->data, packet->length, false);
                     in.IgnoreBytes(sizeof(RakNet::MessageID));
 
                     char msg[50];
-                    if (!in.Read((char*)&mp_color, sizeof(Uint32)) || !in.Read((char*)&mp_index, sizeof(mp_index))) {
-                        sprintf(msg, "WTF HAPPEN ? Unread bits: %i\n", in.GetNumberOfUnreadBits());
-                        OutputDebugString(msg);
-                    }
-                    else {
+                    if (
+                        in.Read((char*)&mp_color, sizeof(Uint32))
+                        &&
+                        in.Read((char*)&mp_index, sizeof(mp_index))
+                    ) {
                         mp_color = ntohl(mp_color);
                         sprintf(msg, "GOT COLOR %x AND INDEX %i", mp_color, mp_index);
                         OutputDebugString(msg);
 
                         player.refresh_texture(renderer, player_surface, player_swoosh, mp_color);
+                        player.idle_speed = 50;
+                    }
+                    else {
+                        sprintf(msg, "WTF HAPPEN ? Unread bits: %i\n", in.GetNumberOfUnreadBits());
+                        OutputDebugString(msg);
                     }
                 } break;
 
@@ -1399,9 +1544,9 @@ int main() {
                     OutputDebugString("Connection lost.\n");
                     break;
                 default:
-                    OutputDebugString("Message with identifier has arrived.\n");
+                    OutputDebugString("Message with unknown identifier has arrived.\n");
                     break;
-                });
+                }
 
                 break;
 
@@ -1411,6 +1556,8 @@ int main() {
             SDL_RenderPresent(renderer);
         }
         else {
+            // =========================================== Actual In-game logic ====================================
+
             if (moved_from[UP] && !controls[UP]) moved_from[UP] = false;
             if (moved_from[DOWN] && !controls[DOWN]) controls[DOWN] = false;
             if (moved_from[LEFT] && !controls[LEFT]) controls[LEFT] = false;
@@ -1453,34 +1600,24 @@ int main() {
                 enemy.update();
                 collide_players(&player, &enemy, &sfx);
 
+                // TODO gotta ask the server if we died on the other end too...
                 if (player.dead && !player_was_dead) {
                     Mix_PlayChannel(7, sfx.kill, 0);
+                    /*
                     if (!enemy.boss) {
                         Mix_PlayMusic(music.death, 0);
                         played_death_music = true;
                     }
+                    */
                     enemy.win();
                     player_was_dead = true;
 
-                    if (stage < sizeof(stages) / sizeof(void*) - 1)
-                        stage -= 1;
                     fade_timeout = 60;
                 }
                 if (enemy.dead && !enemy_was_dead) {
                     Mix_PlayChannel(7, sfx.kill, 0);
                     player.win();
                     enemy_was_dead = true;
-
-                    if (stage == 7) {
-                        if (enemy.boss) {
-                            player_wins = true;
-                            Mix_PlayMusic(music.gameover, 0);
-                        }
-                        else {
-                            enemy.boss = true;
-                        }
-                    }
-                    else stage += 1;
 
                     fade_timeout = 60;
                 }
@@ -1523,20 +1660,45 @@ int main() {
                 clouds[i].render(renderer);
 
             if (fading_in_blank) {
-                fade_alpha += player_wins ? (rand() % 10 > 4 ? 1 : 0) : 2;
+                fade_alpha += 2;
                 if (fade_alpha > 255) {
                     SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
 
                     // Keep incrementing alpha just so we don't have to hack in another timer lol...
-                    if (fade_alpha >= (enemy.boss ? 300 : 260)) {
+                    if (fade_alpha >= 260) {
                         // Re-initialize shit
                         reserve_action = UNSPECIFIED;
-                        ai_function = stages[stage];
-                        memset(ai_data, 0, 128);
                         player.initialize();
                         enemy.initialize();
-                        enemy.cell_x = 6;
-                        enemy.flipped = true;
+
+                        if (IS_HOSTING) {
+                            player.cell_x = 6;
+                            player.flipped = true;
+                            enemy.cell_x = 1;
+                            enemy.flipped = false;
+                        }
+                        else {
+                            enemy.cell_x = 6;
+                            enemy.flipped = true;
+                            player.cell_x = 1;
+                            player.flipped = false;
+                        }
+
+                        if (!started_multiplayer) {
+                            // Intense music
+                            fade_music_to = music.ominous2;
+
+                            // Red sky
+                            SDL_DestroyTexture(tex.background);
+                            temp_surface = IMG_Load("assets/redsky.png");
+                            tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
+                            SDL_FreeSurface(temp_surface);
+
+                            started_multiplayer = true;
+                        }
+
+                        if (player_was_dead) enemy.devil = true;
+                        if (enemy_was_dead) player.devil = true;
                         player_was_dead = false;
                         enemy_was_dead = false;
 
@@ -1548,6 +1710,7 @@ int main() {
                             Mix_PlayMusic(current_music, -1);
                             played_death_music = false;
                         }
+                        // TODO this shouldn't happen but keep it here for reference
                         else if (stage == 4 && !player.devil) {
                             // Intense music
                             fade_music_to = music.ominous2;
@@ -1566,11 +1729,13 @@ int main() {
 
                             enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFFFFE4BE);
                         }
+                        // Again, shouldn't happen
                         else if (stage == 7 && !enemy.devil) {
                             fade_music_to = music.dark;
                             enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFF1D00FF);
                             enemy.devil = true;
                         }
+                        // Still not multiplayer thing
                         else if (enemy.boss && !boss_initialized) {
                             fade_music_to = music.boss;
 
@@ -1613,6 +1778,7 @@ int main() {
                 }
             }
             else if (fading_out_blank) {
+                // This should not happen in multiplayer!!
                 if (player_wins) {
                     if (fade_alpha > 255) {
                         fade_alpha = 0;
