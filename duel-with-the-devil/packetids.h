@@ -8,4 +8,8 @@ enum PacketIds {
     ID_JOIN_GAME,
     ID_HOST_STILL_GOOD,
     ID_READY_TO_ROLL,
+
+    ID_SEND_INPUT,
+    ID_RECEIVE_INPUT,
+    ID_KILL_HAPPENED
 };

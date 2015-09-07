@@ -658,7 +658,7 @@ CollisionResult walk_into_another(Player* p1, Player* p2, Player** loser) {
     }
 }
 
-void collide_players(Player* p1, Player* p2, Sounds* sfx) {
+int collide_players(Player* p1, Player* p2, Sounds* sfx) {
     Player* loser = NULL;
 
     CollisionResult collision = walk_into_eachother(p1, p2, GO_RIGHT, GO_LEFT, 1, &loser);
@@ -673,11 +673,16 @@ void collide_players(Player* p1, Player* p2, Sounds* sfx) {
         Mix_PlayChannel(5, clash, 0);
     }
     else if (collision == KILL) {
+        // makes more sense to do this elsewhere for online play
+        /*
         loser->die();
         loser->push_back();
         if (loser == p1) p2->killer = true;
         else             p1->killer = true;
+        */
+        return loser == p1 ? 1 : 2;
     }
+    return 0;
 }
 
 // ============================ Enemy AI Functions ==========================
@@ -1417,7 +1422,7 @@ int main() {
 
                     player.cell_x = 6;
                     player.flipped = true;
-                    enemy.cell_x = 0;
+                    enemy.cell_x = 1;
                     enemy.flipped = false;
                     enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFF000000);
 
@@ -1594,13 +1599,72 @@ int main() {
             // if (!enemy.devil && player.action_timeout == 1) player.train_against(&enemy);
 
             // ========================== Game Logic =====================
+            Actions enemy_next_action = UNSPECIFIED;
+            int enemy_cell_x = -1;
+            int enemy_cell_y = -1;
+            bool player_actually_died = false;
+            bool enemy_actually_died = false;
+
+            HANDLE_PACKET {
+            case ID_RECEIVE_INPUT: {
+                RakNet::BitStream data(packet->data, packet->length, false);
+                data.IgnoreBytes(sizeof(RakNet::MessageID));
+
+                RakNet::uint24_t action, cell_x, cell_y;
+                data.Read(action);
+                data.Read(cell_x);
+                data.Read(cell_y);
+
+                enemy_next_action = (Actions)(uint32_t)action;
+                enemy_cell_x = cell_x;
+                enemy_cell_y = cell_y;
+            } break;
+
+            case ID_KILL_HAPPENED: {
+                RakNet::BitStream data(packet->data, packet->length, false);
+                data.IgnoreBytes(sizeof(RakNet::MessageID));
+
+                bool player_died = data.ReadBit();
+
+                if (player_died && !player.dead) {
+                    Mix_PlayChannel(7, sfx.kill, 0);
+                    Mix_PlayMusic(music.death, 0);
+                    played_death_music = true;
+
+                    player.die();
+                    player.push_back();
+                    player_was_dead = true;
+                    enemy.killer = true;
+                    enemy.win();
+                }
+                else if (!enemy.dead) {
+                    Mix_PlayChannel(7, sfx.kill, 0);
+
+                    enemy.die();
+                    enemy.push_back();
+                    enemy_was_dead = true;
+                    player.killer = true;
+                    player.win();
+                }
+
+                fade_timeout = 60;
+            } break;
+            }
+
             if (!fading_out_blank) {
-                // ai_function(&enemy, &player, ai_data);
+                if (enemy_next_action != UNSPECIFIED)
+                    enemy.next_action = enemy_next_action;
+
                 player.update();
                 enemy.update();
-                collide_players(&player, &enemy, &sfx);
+
+                if (enemy_cell_x >= 0) enemy.cell_x = enemy_cell_x;
+                if (enemy_cell_y >= 0) enemy.cell_y = enemy_cell_y;
+
+                int kill = collide_players(&player, &enemy, &sfx);
 
                 // TODO gotta ask the server if we died on the other end too...
+                bool player_died_this_frame = false;
                 if (player.dead && !player_was_dead) {
                     Mix_PlayChannel(7, sfx.kill, 0);
                     /*
@@ -1611,15 +1675,42 @@ int main() {
                     */
                     enemy.win();
                     player_was_dead = true;
+                    player_died_this_frame = true;
 
-                    fade_timeout = 60;
+                    // fade_timeout = 60;
                 }
+                bool enemy_died_this_frame = false;
                 if (enemy.dead && !enemy_was_dead) {
                     Mix_PlayChannel(7, sfx.kill, 0);
                     player.win();
                     enemy_was_dead = true;
+                    enemy_died_this_frame = true;
 
-                    fade_timeout = 60;
+                    // fade_timeout = 60;
+                }
+
+                if (fade_timeout <= 0 && (kill != 0 || (player_died_this_frame || enemy_died_this_frame) || player.moved && player.frame_counter == 0)) {
+                    // SEND PACKET
+                    RakNet::BitStream req;
+                    req.Write((RakNet::MessageID)ID_SEND_INPUT);
+                    // Killed by another player flags
+                    kill == 1 ? req.Write1() : req.Write0();
+                    kill == 2 ? req.Write1() : req.Write0();
+
+                    // Suicide flags
+                    player_died_this_frame ? req.Write1() : req.Write0();
+                    enemy_died_this_frame  ? req.Write1() : req.Write0();
+
+                    if (player.moved && player.frame_counter == 0) {
+                        req.Write1();
+                        req.Write((RakNet::uint24_t)player.current_action);
+                        req.Write((RakNet::uint24_t)player.cell_x);
+                        req.Write((RakNet::uint24_t)player.cell_y);
+                    }
+                    else
+                        req.Write0();
+
+                    peer->Send(&req, HIGH_PRIORITY, RELIABLE_ORDERED, 0, server_addr, false);
                 }
             }
             if (fade_timeout > 0) {
@@ -1642,6 +1733,8 @@ int main() {
             }
             else if (player_just_moved) {
                 memset(moved_from, 0, sizeof(moved_from));
+                // TODO uh shit this might've been a bug. uncomment to fix bug???
+                // player_just_moved = false;
             }
 
             // ====================== Render ========================
@@ -1697,8 +1790,8 @@ int main() {
                             started_multiplayer = true;
                         }
 
-                        if (player_was_dead) enemy.devil = true;
-                        if (enemy_was_dead) player.devil = true;
+                        enemy.devil = player_was_dead;
+                        player.devil = enemy_was_dead;
                         player_was_dead = false;
                         enemy_was_dead = false;
 
