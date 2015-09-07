@@ -1260,6 +1260,7 @@ int main() {
     bool player_wins = false;
 
     Uint32 mp_color = 0;
+    RakNet::SystemIndex mp_index = -1;
 
     // Hell yeah let's add more flags
     enum {
@@ -1333,7 +1334,6 @@ int main() {
                     break;
                 })
 
-                if (peer->NumberOfConnections() > 0)
                 break;
 
             case CONNECTED:
@@ -1379,13 +1379,13 @@ int main() {
                     in.IgnoreBytes(sizeof(RakNet::MessageID));
 
                     char msg[50];
-                    if (!in.Read((char*)&mp_color, sizeof(Uint32))) {
+                    if (!in.Read((char*)&mp_color, sizeof(Uint32)) || !in.Read((char*)&mp_index, sizeof(mp_index))) {
                         sprintf(msg, "WTF HAPPEN ? Unread bits: %i\n", in.GetNumberOfUnreadBits());
                         OutputDebugString(msg);
                     }
                     else {
                         mp_color = ntohl(mp_color);
-                        sprintf(msg, "GOT COLOR %x", mp_color);
+                        sprintf(msg, "GOT COLOR %x AND INDEX %i", mp_color, mp_index);
                         OutputDebugString(msg);
 
                         player.refresh_texture(renderer, player_surface, player_swoosh, mp_color);
