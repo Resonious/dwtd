@@ -1,3 +1,6 @@
+#include "RakPeerInterface.h"
+#include "MessageIdentifiers.h"
+
 #ifdef _WIN32
 #include <Windows.h>
 #else
@@ -1092,10 +1095,6 @@ void boss_ai(Player* player, Player* other_player, void* rawdata) {
 #define keypressed(ctl) (!controls[ctl] && last_controls[ctl])
 #define NUM_CLOUDS 15
 
-bool any(bool controls[4]) {
-    return controls[0] || controls[1] || controls[2] || controls[3];
-}
-
 #ifdef _WIN32
 int WinMain(HINSTANCE hinst, HINSTANCE prev, LPSTR cmdline, int cmdshow) {
 #else
@@ -1288,11 +1287,11 @@ int main() {
         else if (controls[DOWN]  && !moved_from[DOWN])  player.next_action = GO_DOWN;
         else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
 
-        if (!enemy.devil && player.action_timeout == 1) player.train_against(&enemy);
+        // if (!enemy.devil && player.action_timeout == 1) player.train_against(&enemy);
 
         // ========================== Game Logic =====================
         if (!fading_out_blank) {
-            ai_function(&enemy, &player, ai_data);
+            // ai_function(&enemy, &player, ai_data);
             player.update();
             enemy.update();
             collide_players(&player, &enemy, &sfx);
@@ -1372,7 +1371,7 @@ int main() {
                 SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
 
                 // Keep incrementing alpha just so we don't have to hack in another timer lol...
-                if (fade_alpha >= enemy.boss ? 300 : 260) {
+                if (fade_alpha >= (enemy.boss ? 300 : 260)) {
                     // Re-initialize shit
                     reserve_action = UNSPECIFIED;
                     ai_function = stages[stage];
