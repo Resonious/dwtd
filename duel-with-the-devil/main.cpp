@@ -1,5 +1,8 @@
 #include "RakPeerInterface.h"
 #include "MessageIdentifiers.h"
+#include "BitStream.h"
+#include "RakNetTypes.h"  // MessageID
+#include "packetids.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -47,6 +50,10 @@ struct Textures {
     SDL_Texture* cloud;
     SDL_Texture* boss_horns;
     SDL_Texture* thanks_for_playing;
+
+    SDL_Texture* connecting_to_server;
+    SDL_Texture* press_h_to_host;
+    SDL_Texture* awaiting_client;
 };
 
 struct Musics {
@@ -1095,6 +1102,8 @@ void boss_ai(Player* player, Player* other_player, void* rawdata) {
 #define keypressed(ctl) (!controls[ctl] && last_controls[ctl])
 #define NUM_CLOUDS 15
 
+#define HANDLE_PACKET(x) for (packet = peer->Receive(); packet; peer->DeallocatePacket(packet), packet = peer->Receive()) { switch (packet->data[0]) x }
+
 #ifdef _WIN32
 int WinMain(HINSTANCE hinst, HINSTANCE prev, LPSTR cmdline, int cmdshow) {
 #else
@@ -1170,6 +1179,18 @@ int main() {
     tex.thanks_for_playing = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
+    temp_surface = IMG_Load("assets/msg/connecting-to-server.png");
+    tex.connecting_to_server = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_FreeSurface(temp_surface);
+
+    temp_surface = IMG_Load("assets/msg/h-to-host.png");
+    tex.press_h_to_host = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_FreeSurface(temp_surface);
+
+    temp_surface = IMG_Load("assets/msg/awaiting-client.png");
+    tex.awaiting_client = SDL_CreateTextureFromSurface(renderer, temp_surface);
+    SDL_FreeSurface(temp_surface);
+
     player_swoosh = IMG_Load("assets/player/swoosh.png");
     enemy_swoosh  = IMG_Load("assets/player/swoosh.png");
 
@@ -1198,7 +1219,7 @@ int main() {
 
     // ====================== Initialize Things That Do Stuff ======================
     Player player(renderer, player_surface, player_swoosh, &tex, &sfx, 0);
-    player.initialize_training_data();
+    // player.initialize_training_data();
     Player enemy(renderer, enemy_surface, enemy_swoosh, &tex, &sfx, 0xFF6984AD);
     enemy.cell_x = 6;
     enemy.flipped = true;
@@ -1238,13 +1259,27 @@ int main() {
     bool boss_initialized = false;
     bool player_wins = false;
 
+    Uint32 mp_color = 0;
+
+    // Hell yeah let's add more flags
+    enum {
+        NOT_CONNECTED, CONNECTING, CONNECTED, AWAITING_CLIENT, JOINING_GAME, PLAYING
+    } multiplayer_status = NOT_CONNECTED;
+
+    RakNet::RakPeerInterface* peer = RakNet::RakPeerInterface::GetInstance();
+    RakNet::Packet* packet;
+    RakNet::SystemAddress server_addr("127.0.0.1", 3999);
+
     while (true) {
         // ============= Frame Setup =================
         Uint64 frame_start = SDL_GetPerformanceCounter();
 
         while (SDL_PollEvent(&event)) {
             switch (event.type) {
-            case SDL_QUIT: exit(0); break;
+            case SDL_QUIT:
+                RakNet::RakPeerInterface::DestroyInstance(peer);
+                exit(0);
+                break;
             }
         }
 
@@ -1254,234 +1289,356 @@ int main() {
         controls[LEFT]  = keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A];
         controls[RIGHT] = keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D];
 
-        if (moved_from[UP] && !controls[UP]) moved_from[UP] = false;
-        if (moved_from[DOWN] && !controls[DOWN]) controls[DOWN] = false;
-        if (moved_from[LEFT] && !controls[LEFT]) controls[LEFT] = false;
-        if (moved_from[RIGHT] && !controls[RIGHT]) controls[RIGHT] = false;
+        if (multiplayer_status != PLAYING) {
+            // ====================== Render ========================
+            SDL_RenderClear(renderer);
 
-        if (player.moved && player.frame_counter > 0) {
-            if (keys_pressed_since_move[RIGHT]) {
-                if (keyreleased(RIGHT)) reserve_action = GO_RIGHT;
-            }
-            else keys_pressed_since_move[RIGHT] = keypressed(RIGHT);
+            SDL_RenderCopy(renderer, tex.background, NULL, NULL);
+            for (int i = 0; i < NUM_CLOUDS / 2; i++)
+                clouds[i].render(renderer);
 
-            if (keys_pressed_since_move[LEFT]) {
-                if (keyreleased(LEFT)) reserve_action = GO_LEFT;
-            }
-            else keys_pressed_since_move[LEFT] = keypressed(LEFT);
+            SDL_RenderCopy(renderer, tex.platform, NULL, NULL);
 
-            if (keys_pressed_since_move[UP]) {
-                if (keyreleased(UP)) reserve_action = GO_UP;
-            }
-            else keys_pressed_since_move[UP] = keypressed(UP);
+            for (int i = NUM_CLOUDS / 2; i < NUM_CLOUDS; i++)
+                clouds[i].render(renderer);
 
-            if (keys_pressed_since_move[DOWN]) {
-                if (keyreleased(DOWN)) reserve_action = GO_DOWN;
-            }
-            else keys_pressed_since_move[DOWN] = keypressed(DOWN);
-        }
-
-        if      (controls[RIGHT] && !moved_from[RIGHT]) player.next_action = GO_RIGHT;
-        else if (controls[LEFT]  && !moved_from[LEFT])  player.next_action = GO_LEFT;
-        else if (controls[UP]    && !moved_from[UP])    player.next_action = GO_UP;
-        else if (controls[DOWN]  && !moved_from[DOWN])  player.next_action = GO_DOWN;
-        else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
-
-        // if (!enemy.devil && player.action_timeout == 1) player.train_against(&enemy);
-
-        // ========================== Game Logic =====================
-        if (!fading_out_blank) {
-            // ai_function(&enemy, &player, ai_data);
-            player.update();
-            enemy.update();
-            collide_players(&player, &enemy, &sfx);
-
-            if (player.dead && !player_was_dead) {
-                Mix_PlayChannel(7, sfx.kill, 0);
-                if (!enemy.boss) {
-                    Mix_PlayMusic(music.death, 0);
-                    played_death_music = true;
+            switch (multiplayer_status) {
+            case NOT_CONNECTED:
+                // Draw "connecting to server" message
+                SDL_RenderCopy(renderer, tex.connecting_to_server, NULL, NULL);
+                // Start connecting or some shit.
+                {
+                    RakNet::SocketDescriptor sd;
+                    peer->Startup(1, &sd, 1);
                 }
-                enemy.win();
-                player_was_dead = true;
+                printf("Starting the client.\n");
+                peer->Connect("127.0.0.1", 3999, 0,0);
 
-                if (stage < sizeof(stages) / sizeof(void*) - 1)
-                    stage -= 1;
-                fade_timeout = 60;
-            }
-            if (enemy.dead && !enemy_was_dead) {
-                Mix_PlayChannel(7, sfx.kill, 0);
-                player.win();
-                enemy_was_dead = true;
+                multiplayer_status = CONNECTING;
+                break;
 
-                if (stage == 7) {
-                    if (enemy.boss) {
-                        player_wins = true;
-                        Mix_PlayMusic(music.gameover, 0);
+            case CONNECTING:
+                // Draw "connecting to server" message
+                SDL_RenderCopy(renderer, tex.connecting_to_server, NULL, NULL);
+
+                HANDLE_PACKET({
+                case ID_CONNECTION_REQUEST_ACCEPTED:
+                    OutputDebugString("Our connection request has been accepted.\n");
+                    multiplayer_status = CONNECTED;
+                    server_addr = packet->systemAddress;
+                    break;                    
+
+                default:
+                    OutputDebugString("UNABLE TO CONNECT\n");
+                    break;
+                })
+
+                if (peer->NumberOfConnections() > 0)
+                break;
+
+            case CONNECTED:
+                // Draw "press h to host" message
+                SDL_RenderCopy(renderer, tex.press_h_to_host, NULL, NULL);
+
+                // TODO query and draw waiting client list?
+
+                // host on 'h' press lol
+                if (keys[SDL_SCANCODE_H]) {
+                    RakNet::BitStream color_req;
+                    color_req.Write((RakNet::MessageID)ID_NEW_HOST);
+                    peer->Send(&color_req, HIGH_PRIORITY, RELIABLE_ORDERED, 0, server_addr, false);
+
+                    player.cell_x = 6;
+                    player.flipped = true;
+                    enemy.cell_x = 0;
+                    enemy.flipped = false;
+                    enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFF000000);
+
+                    multiplayer_status = AWAITING_CLIENT;
+                }
+                break;
+
+            case AWAITING_CLIENT:
+                // "awaiting client" message
+                SDL_RenderCopy(renderer, tex.awaiting_client, NULL, NULL);
+
+                if (mp_color != 0)
+                    player.render(renderer);
+
+                // RakNet::BitStream::GetNumberOfUnreadBits()
+                HANDLE_PACKET({
+                case ID_REMOTE_DISCONNECTION_NOTIFICATION:
+                    OutputDebugString("Another client has disconnected.\n");
+                    break;
+                case ID_REMOTE_CONNECTION_LOST:
+                    OutputDebugString("Another client has lost the connection.\n");
+                    break;
+
+                case ID_ASSIGNED_COLOR: {
+                    RakNet::BitStream in(packet->data, packet->length, false);
+                    in.IgnoreBytes(sizeof(RakNet::MessageID));
+
+                    char msg[50];
+                    if (!in.Read((char*)&mp_color, sizeof(Uint32))) {
+                        sprintf(msg, "WTF HAPPEN ? Unread bits: %i\n", in.GetNumberOfUnreadBits());
+                        OutputDebugString(msg);
                     }
                     else {
-                        enemy.boss = true;
+                        mp_color = ntohl(mp_color);
+                        sprintf(msg, "GOT COLOR %x", mp_color);
+                        OutputDebugString(msg);
+
+                        player.refresh_texture(renderer, player_surface, player_swoosh, mp_color);
                     }
+                } break;
+
+                case ID_DISCONNECTION_NOTIFICATION:
+                    OutputDebugString("We have been disconnected.\n");
+                    break;
+                case ID_CONNECTION_LOST:
+                    OutputDebugString("Connection lost.\n");
+                    break;
+                default:
+                    OutputDebugString("Message with identifier has arrived.\n");
+                    break;
+                });
+
+                break;
+
+            default: break;
+            }
+
+            SDL_RenderPresent(renderer);
+        }
+        else {
+            if (moved_from[UP] && !controls[UP]) moved_from[UP] = false;
+            if (moved_from[DOWN] && !controls[DOWN]) controls[DOWN] = false;
+            if (moved_from[LEFT] && !controls[LEFT]) controls[LEFT] = false;
+            if (moved_from[RIGHT] && !controls[RIGHT]) controls[RIGHT] = false;
+
+            if (player.moved && player.frame_counter > 0) {
+                if (keys_pressed_since_move[RIGHT]) {
+                    if (keyreleased(RIGHT)) reserve_action = GO_RIGHT;
                 }
-                else stage += 1;
+                else keys_pressed_since_move[RIGHT] = keypressed(RIGHT);
 
-                fade_timeout = 60;
+                if (keys_pressed_since_move[LEFT]) {
+                    if (keyreleased(LEFT)) reserve_action = GO_LEFT;
+                }
+                else keys_pressed_since_move[LEFT] = keypressed(LEFT);
+
+                if (keys_pressed_since_move[UP]) {
+                    if (keyreleased(UP)) reserve_action = GO_UP;
+                }
+                else keys_pressed_since_move[UP] = keypressed(UP);
+
+                if (keys_pressed_since_move[DOWN]) {
+                    if (keyreleased(DOWN)) reserve_action = GO_DOWN;
+                }
+                else keys_pressed_since_move[DOWN] = keypressed(DOWN);
             }
-        }
-        if (fade_timeout > 0) {
-            fade_timeout -= 1;
-            if (fade_timeout == 0) fading_in_blank = true;
-        }
 
-        // ====================== Postmortem Control Logic ==============
-        if (player.moved) {
-            if (player.frame_counter == 0) {
-                player_just_moved = true;
-                memset(moved_from, 0, sizeof(moved_from));
-                int key_from_action = player.current_action - 1;
-                if (key_from_action >= 0 && key_from_action < sizeof(keys))
-                    moved_from[key_from_action] = true;
+            if (controls[RIGHT] && !moved_from[RIGHT]) player.next_action = GO_RIGHT;
+            else if (controls[LEFT] && !moved_from[LEFT])  player.next_action = GO_LEFT;
+            else if (controls[UP] && !moved_from[UP])    player.next_action = GO_UP;
+            else if (controls[DOWN] && !moved_from[DOWN])  player.next_action = GO_DOWN;
+            else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
 
-                reserve_action = UNSPECIFIED;
-                memset(keys_pressed_since_move, 0, sizeof(keys_pressed_since_move));
+            // if (!enemy.devil && player.action_timeout == 1) player.train_against(&enemy);
+
+            // ========================== Game Logic =====================
+            if (!fading_out_blank) {
+                // ai_function(&enemy, &player, ai_data);
+                player.update();
+                enemy.update();
+                collide_players(&player, &enemy, &sfx);
+
+                if (player.dead && !player_was_dead) {
+                    Mix_PlayChannel(7, sfx.kill, 0);
+                    if (!enemy.boss) {
+                        Mix_PlayMusic(music.death, 0);
+                        played_death_music = true;
+                    }
+                    enemy.win();
+                    player_was_dead = true;
+
+                    if (stage < sizeof(stages) / sizeof(void*) - 1)
+                        stage -= 1;
+                    fade_timeout = 60;
+                }
+                if (enemy.dead && !enemy_was_dead) {
+                    Mix_PlayChannel(7, sfx.kill, 0);
+                    player.win();
+                    enemy_was_dead = true;
+
+                    if (stage == 7) {
+                        if (enemy.boss) {
+                            player_wins = true;
+                            Mix_PlayMusic(music.gameover, 0);
+                        }
+                        else {
+                            enemy.boss = true;
+                        }
+                    }
+                    else stage += 1;
+
+                    fade_timeout = 60;
+                }
             }
-        }
-        else if (player_just_moved) {
-            memset(moved_from, 0, sizeof(moved_from));
-        }
+            if (fade_timeout > 0) {
+                fade_timeout -= 1;
+                if (fade_timeout == 0) fading_in_blank = true;
+            }
 
-        // ====================== Render ========================
-        SDL_RenderClear(renderer);
+            // ====================== Postmortem Control Logic ==============
+            if (player.moved) {
+                if (player.frame_counter == 0) {
+                    player_just_moved = true;
+                    memset(moved_from, 0, sizeof(moved_from));
+                    int key_from_action = player.current_action - 1;
+                    if (key_from_action >= 0 && key_from_action < sizeof(keys))
+                        moved_from[key_from_action] = true;
 
-        SDL_RenderCopy(renderer, tex.background, NULL, NULL);
-        for (int i = 0; i < NUM_CLOUDS / 2; i++)
-            clouds[i].render(renderer);
-
-        SDL_RenderCopy(renderer, tex.platform, NULL, NULL);
-
-        player.render(renderer);
-        enemy.render(renderer);
-
-        for (int i = NUM_CLOUDS / 2; i < NUM_CLOUDS; i++)
-            clouds[i].render(renderer);
-
-        if (fading_in_blank) {
-            fade_alpha += player_wins ? (rand() % 10 > 4 ? 1 : 0) : 2;
-            if (fade_alpha > 255) {
-                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
-
-                // Keep incrementing alpha just so we don't have to hack in another timer lol...
-                if (fade_alpha >= (enemy.boss ? 300 : 260)) {
-                    // Re-initialize shit
                     reserve_action = UNSPECIFIED;
-                    ai_function = stages[stage];
-                    memset(ai_data, 0, 128);
-                    player.initialize();
-                    enemy.initialize();
-                    enemy.cell_x = 6;
-                    enemy.flipped = true;
-                    player_was_dead = false;
-                    enemy_was_dead = false;
-
-                    fade_alpha = 255;
-                    fading_in_blank = false;
-                    fading_out_blank = true;
-
-                    if (played_death_music) {
-                        Mix_PlayMusic(current_music, -1);
-                        played_death_music = false;
-                    }
-                    else if (stage == 4 && !player.devil) {
-                        // Intense music
-                        fade_music_to = music.ominous2;
-
-                        // Red sky
-                        SDL_DestroyTexture(tex.background);
-                        temp_surface = IMG_Load("assets/redsky.png");
-                        tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
-                        SDL_FreeSurface(temp_surface);
-
-                        // Faster clouds
-                        for (int i = 0; i < NUM_CLOUDS; i++)
-                            clouds[i].speed += 7;
-
-                        player.devil = true;
-
-                        enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFFFFE4BE);
-                    }
-                    else if (stage == 7 && !enemy.devil) {
-                        fade_music_to = music.dark;
-                        enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFF1D00FF);
-                        enemy.devil = true;
-                    }
-                    else if (enemy.boss && !boss_initialized) {
-                        fade_music_to = music.boss;
-
-                        // Load up the big man skin.
-                        SDL_FreeSurface(enemy_surface);
-                        SDL_FreeSurface(enemy_swoosh);
-                        enemy_surface = IMG_Load("assets/player/boss.png");
-                        enemy_swoosh = IMG_Load("assets/player/boss_swoosh.png");
-                        enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0);
-                        enemy.horns_tex = tex.boss_horns;
-
-                        // Final sky.
-                        SDL_DestroyTexture(tex.background);
-                        temp_surface = IMG_Load("assets/finalsky.png");
-                        tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
-                        SDL_FreeSurface(temp_surface);
-
-                        // Final mountain.
-                        SDL_DestroyTexture(tex.platform);
-                        temp_surface = IMG_Load("assets/finalmountain.png");
-                        tex.platform = SDL_CreateTextureFromSurface(renderer, temp_surface);
-                        SDL_FreeSurface(temp_surface);
-
-                        // FASTER CLOUDS LETS GO.
-                        for (int i = 0; i < NUM_CLOUDS; i++)
-                            clouds[i].speed = 10;
-
-                        ai_function = boss_ai;
-
-                        boss_initialized = true;
-                    }
-                    else if (player_wins) {
-                        fade_alpha = 256;
-                    }
+                    memset(keys_pressed_since_move, 0, sizeof(keys_pressed_since_move));
                 }
             }
-            else {
-                SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
-                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+            else if (player_just_moved) {
+                memset(moved_from, 0, sizeof(moved_from));
             }
-        }
-        else if (fading_out_blank) {
-            if (player_wins) {
+
+            // ====================== Render ========================
+            SDL_RenderClear(renderer);
+
+            SDL_RenderCopy(renderer, tex.background, NULL, NULL);
+            for (int i = 0; i < NUM_CLOUDS / 2; i++)
+                clouds[i].render(renderer);
+
+            SDL_RenderCopy(renderer, tex.platform, NULL, NULL);
+
+            player.render(renderer);
+            enemy.render(renderer);
+
+            for (int i = NUM_CLOUDS / 2; i < NUM_CLOUDS; i++)
+                clouds[i].render(renderer);
+
+            if (fading_in_blank) {
+                fade_alpha += player_wins ? (rand() % 10 > 4 ? 1 : 0) : 2;
                 if (fade_alpha > 255) {
-                    fade_alpha = 0;
-                }
-                if (fade_alpha != 255 && rand() % 10 > 6)
-                    fade_alpha += 1;
+                    SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
 
-                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
-                SDL_SetTextureAlphaMod(tex.thanks_for_playing, fade_alpha);
-                SDL_RenderCopy(renderer, tex.thanks_for_playing, NULL, NULL);
-            }
-            else {
-                fade_alpha -= enemy.boss ? 4 : 2;
-                if (fade_alpha <= 0) {
-                    fade_alpha = 0;
-                    fading_out_blank = false;
+                    // Keep incrementing alpha just so we don't have to hack in another timer lol...
+                    if (fade_alpha >= (enemy.boss ? 300 : 260)) {
+                        // Re-initialize shit
+                        reserve_action = UNSPECIFIED;
+                        ai_function = stages[stage];
+                        memset(ai_data, 0, 128);
+                        player.initialize();
+                        enemy.initialize();
+                        enemy.cell_x = 6;
+                        enemy.flipped = true;
+                        player_was_dead = false;
+                        enemy_was_dead = false;
+
+                        fade_alpha = 255;
+                        fading_in_blank = false;
+                        fading_out_blank = true;
+
+                        if (played_death_music) {
+                            Mix_PlayMusic(current_music, -1);
+                            played_death_music = false;
+                        }
+                        else if (stage == 4 && !player.devil) {
+                            // Intense music
+                            fade_music_to = music.ominous2;
+
+                            // Red sky
+                            SDL_DestroyTexture(tex.background);
+                            temp_surface = IMG_Load("assets/redsky.png");
+                            tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
+                            SDL_FreeSurface(temp_surface);
+
+                            // Faster clouds
+                            for (int i = 0; i < NUM_CLOUDS; i++)
+                                clouds[i].speed += 7;
+
+                            player.devil = true;
+
+                            enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFFFFE4BE);
+                        }
+                        else if (stage == 7 && !enemy.devil) {
+                            fade_music_to = music.dark;
+                            enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFF1D00FF);
+                            enemy.devil = true;
+                        }
+                        else if (enemy.boss && !boss_initialized) {
+                            fade_music_to = music.boss;
+
+                            // Load up the big man skin.
+                            SDL_FreeSurface(enemy_surface);
+                            SDL_FreeSurface(enemy_swoosh);
+                            enemy_surface = IMG_Load("assets/player/boss.png");
+                            enemy_swoosh = IMG_Load("assets/player/boss_swoosh.png");
+                            enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0);
+                            enemy.horns_tex = tex.boss_horns;
+
+                            // Final sky.
+                            SDL_DestroyTexture(tex.background);
+                            temp_surface = IMG_Load("assets/finalsky.png");
+                            tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
+                            SDL_FreeSurface(temp_surface);
+
+                            // Final mountain.
+                            SDL_DestroyTexture(tex.platform);
+                            temp_surface = IMG_Load("assets/finalmountain.png");
+                            tex.platform = SDL_CreateTextureFromSurface(renderer, temp_surface);
+                            SDL_FreeSurface(temp_surface);
+
+                            // FASTER CLOUDS LETS GO.
+                            for (int i = 0; i < NUM_CLOUDS; i++)
+                                clouds[i].speed = 10;
+
+                            ai_function = boss_ai;
+
+                            boss_initialized = true;
+                        }
+                        else if (player_wins) {
+                            fade_alpha = 256;
+                        }
+                    }
                 }
-                SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
-                SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+                else {
+                    SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
+                    SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+                }
             }
+            else if (fading_out_blank) {
+                if (player_wins) {
+                    if (fade_alpha > 255) {
+                        fade_alpha = 0;
+                    }
+                    if (fade_alpha != 255 && rand() % 10 > 6)
+                        fade_alpha += 1;
+
+                    SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+                    SDL_SetTextureAlphaMod(tex.thanks_for_playing, fade_alpha);
+                    SDL_RenderCopy(renderer, tex.thanks_for_playing, NULL, NULL);
+                }
+                else {
+                    fade_alpha -= enemy.boss ? 4 : 2;
+                    if (fade_alpha <= 0) {
+                        fade_alpha = 0;
+                        fading_out_blank = false;
+                    }
+                    SDL_SetTextureAlphaMod(tex.blank, fade_alpha);
+                    SDL_RenderCopy(renderer, tex.blank, NULL, NULL);
+                }
+            }
+
+            SDL_RenderPresent(renderer);
+
+            memcpy(&last_controls, &controls, sizeof(controls));
         }
-
-        SDL_RenderPresent(renderer);
-
-        memcpy(&last_controls, &controls, sizeof(controls));
-
         // ===================== Handle Music Transition =================
         if (fade_music_to) {
             if (current_music) {
@@ -1503,5 +1660,5 @@ int main() {
             SDL_Delay(17 - frame_ms);
     }
 
-	return 0;
+    return 0;
 }
