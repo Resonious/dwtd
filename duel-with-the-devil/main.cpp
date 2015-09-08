@@ -129,6 +129,7 @@ struct Player {
     bool killer;
     bool action_done;
     bool boss;
+    bool remote;
     // Used to log behavior for final battle
     int*** training;
 
@@ -211,6 +212,7 @@ struct Player {
         initialize();
         devil = false;
         boss = false;
+        remote = false;
     }
 
     ~Player() {
@@ -356,7 +358,7 @@ struct Player {
                     break;
 
                 case GO_LEFT:
-                    cell_x -= 1;
+                    if (!remote) cell_x -= 1;
                     if (previous_action != GO_DOWN)
                         flipped = true;
                     if (cell_y < ground_level) {
@@ -369,7 +371,7 @@ struct Player {
                     break;
 
                 case GO_RIGHT:
-                    cell_x += 1;
+                    if (!remote) cell_x += 1;
                     if (previous_action != GO_DOWN)
                         flipped = false;
                     if (cell_y < ground_level) {
@@ -386,12 +388,14 @@ struct Player {
                 }
 
                 if ((cell_x <= 0 || cell_x >= 7) && cell_y == ground_level && previous_action != GO_DOWN) {
-                    frame = 7;
-                    frame_counter = 0;
-                    falling = true;
-                    if (cell_x <= 0) flipped = false;
-                    else flipped = true;
-                    dead = true;
+                    if (!remote) {
+                        frame = 7;
+                        frame_counter = 0;
+                        falling = true;
+                        if (cell_x <= 0) flipped = false;
+                        else flipped = true;
+                        dead = true;
+                    }
                 }
 
                 next_action = UNSPECIFIED;
@@ -644,7 +648,8 @@ CollisionResult walk_into_another(Player* p1, Player* p2, Player** loser) {
     }
     else if (p1->current_action == NONE) {
         // I think this means p1 fell onto p2
-        p1->push_back();
+        // No clash - this does weird things in multiplayer sometimes
+        // p1->push_back();
         return CLASH;
     }
     else if (p1->current_action == GO_DOWN) {
@@ -680,6 +685,7 @@ int collide_players(Player* p1, Player* p2, Sounds* sfx) {
         if (loser == p1) p2->killer = true;
         else             p1->killer = true;
         */
+        loser->push_back();
         return loser == p1 ? 1 : 2;
     }
     return 0;
@@ -1256,6 +1262,7 @@ int main() {
     Player player(renderer, player_surface, player_swoosh, &tex, &sfx, 0);
     // player.initialize_training_data();
     Player enemy(renderer, enemy_surface, enemy_swoosh, &tex, &sfx, 0xFF6984AD);
+    enemy.remote = true;
     enemy.cell_x = 6;
     enemy.flipped = true;
 
@@ -1303,6 +1310,8 @@ int main() {
     Uint32 num_hosts;
 
     bool started_multiplayer = false;
+    bool make_player_boss = false;
+    bool make_enemy_boss = false;
 
     // Hell yeah let's add more flags
     enum {
@@ -1621,30 +1630,39 @@ int main() {
             } break;
 
             case ID_KILL_HAPPENED: {
+                OutputDebugString("kill happen----------\n");
+
                 RakNet::BitStream data(packet->data, packet->length, false);
                 data.IgnoreBytes(sizeof(RakNet::MessageID));
 
                 bool player_died = data.ReadBit();
+                bool boss_mode = data.ReadBit();
 
-                if (player_died && !player.dead) {
-                    Mix_PlayChannel(7, sfx.kill, 0);
-                    Mix_PlayMusic(music.death, 0);
-                    played_death_music = true;
+                if (player_died) {
+                    if (!player.dead) {
+                        Mix_PlayChannel(7, sfx.kill, 0);
+                        if (!enemy.boss) {
+                            Mix_PlayMusic(music.death, 0);
+                            played_death_music = true;
+                        }
 
-                    player.die();
-                    player.push_back();
-                    player_was_dead = true;
-                    enemy.killer = true;
-                    enemy.win();
+                        player.die();
+                        player_was_dead = true;
+                        enemy.killer = true;
+                        enemy.win();
+                    }
+                    if (boss_mode && !(player.boss || enemy.boss)) make_enemy_boss = true;
                 }
-                else if (!enemy.dead) {
-                    Mix_PlayChannel(7, sfx.kill, 0);
+                else {
+                    if (!enemy.dead) {
+                        Mix_PlayChannel(7, sfx.kill, 0);
 
-                    enemy.die();
-                    enemy.push_back();
-                    enemy_was_dead = true;
-                    player.killer = true;
-                    player.win();
+                        enemy.die();
+                        enemy_was_dead = true;
+                        player.killer = true;
+                        player.win();
+                    }
+                    if (boss_mode && !(player.boss || enemy.boss)) make_player_boss = true;
                 }
 
                 fade_timeout = 60;
@@ -1659,11 +1677,9 @@ int main() {
                 enemy.update();
 
                 if (enemy_cell_x >= 0) enemy.cell_x = enemy_cell_x;
-                if (enemy_cell_y >= 0) enemy.cell_y = enemy_cell_y;
 
                 int kill = collide_players(&player, &enemy, &sfx);
 
-                // TODO gotta ask the server if we died on the other end too...
                 bool player_died_this_frame = false;
                 if (player.dead && !player_was_dead) {
                     Mix_PlayChannel(7, sfx.kill, 0);
@@ -1761,8 +1777,13 @@ int main() {
                     if (fade_alpha >= 260) {
                         // Re-initialize shit
                         reserve_action = UNSPECIFIED;
+                        bool plr_was_boss = player.boss;
+                        bool enm_was_boss = enemy.boss;
+
                         player.initialize();
+                        player.boss = plr_was_boss;
                         enemy.initialize();
+                        enemy.boss = enm_was_boss;
 
                         if (IS_HOSTING) {
                             player.cell_x = 6;
@@ -1790,8 +1811,8 @@ int main() {
                             started_multiplayer = true;
                         }
 
-                        enemy.devil = player_was_dead;
-                        player.devil = enemy_was_dead;
+                        enemy.devil = player_was_dead || plr_was_boss;
+                        player.devil = enemy_was_dead || enm_was_boss;
                         player_was_dead = false;
                         enemy_was_dead = false;
 
@@ -1828,17 +1849,29 @@ int main() {
                             enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0xFF1D00FF);
                             enemy.devil = true;
                         }
-                        // Still not multiplayer thing
-                        else if (enemy.boss && !boss_initialized) {
+                        // This has been repurposed for multiplayer
+                        if (make_player_boss || make_enemy_boss) {
                             fade_music_to = music.boss;
 
                             // Load up the big man skin.
                             SDL_FreeSurface(enemy_surface);
                             SDL_FreeSurface(enemy_swoosh);
-                            enemy_surface = IMG_Load("assets/player/boss.png");
-                            enemy_swoosh = IMG_Load("assets/player/boss_swoosh.png");
-                            enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0);
-                            enemy.horns_tex = tex.boss_horns;
+                            if (make_enemy_boss) {
+                                enemy.boss = true;
+                                enemy.devil = true;
+                                enemy_surface = IMG_Load("assets/player/boss.png");
+                                enemy_swoosh = IMG_Load("assets/player/boss_swoosh.png");
+                                enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0);
+                                enemy.horns_tex = tex.boss_horns;
+                            }
+                            else if (make_player_boss) {
+                                player.boss = true;
+                                player.devil = true;
+                                player_surface = IMG_Load("assets/player/boss.png");
+                                player_swoosh = IMG_Load("assets/player/boss_swoosh.png");
+                                player.refresh_texture(renderer, player_surface, player_swoosh, 0);
+                                player.horns_tex = tex.boss_horns;
+                            }
 
                             // Final sky.
                             SDL_DestroyTexture(tex.background);
@@ -1856,8 +1889,10 @@ int main() {
                             for (int i = 0; i < NUM_CLOUDS; i++)
                                 clouds[i].speed = 10;
 
-                            ai_function = boss_ai;
+                            // ai_function = boss_ai;
 
+                            make_player_boss = false;
+                            make_enemy_boss = false;
                             boss_initialized = true;
                         }
                         else if (player_wins) {
@@ -1884,7 +1919,7 @@ int main() {
                     SDL_RenderCopy(renderer, tex.thanks_for_playing, NULL, NULL);
                 }
                 else {
-                    fade_alpha -= enemy.boss ? 4 : 2;
+                    fade_alpha -= 2;
                     if (fade_alpha <= 0) {
                         fade_alpha = 0;
                         fading_out_blank = false;
