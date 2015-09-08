@@ -1320,7 +1320,7 @@ int main() {
 
     RakNet::RakPeerInterface* peer = RakNet::RakPeerInterface::GetInstance();
     RakNet::Packet* packet;
-    RakNet::SystemAddress server_addr("127.0.0.1", 3999);
+    RakNet::SystemAddress server_addr("45.63.16.189", 8081);
 
     while (true) {
         // ============= Frame Setup =================
@@ -1364,7 +1364,7 @@ int main() {
                     peer->Startup(1, &sd, 1);
                 }
                 printf("Starting the client.\n");
-                peer->Connect("127.0.0.1", 3999, 0,0);
+                peer->Connect("45.63.16.189", 8081, 0,0);
 
                 multiplayer_status = CONNECTING;
                 break;
@@ -1382,7 +1382,7 @@ int main() {
 
                 default:
                     OutputDebugString("UNABLE TO CONNECT\n");
-                    peer->Connect("127.0.0.1", 3999, 0,0);
+                    peer->Connect("45.63.16.189", 8081, 0,0);
                     break;
                 }
 
