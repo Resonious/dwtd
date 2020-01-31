@@ -105,7 +105,20 @@ EM_JS(bool, music_is_playing, (), {
 });
 
 
+
+void (*emscripten_main_loop)();
+bool setup_timing = false;
+
+void main_loop_wrapper() {
+    if (!setup_timing) {
+        emscripten_set_main_loop_timing(EM_TIMING_SETTIMEOUT, 17);
+        setup_timing = true;
+    }
+    emscripten_main_loop();
+}
+
+
 void start_looping(void (*fun)()) {
-    emscripten_set_main_loop(fun, 0, 1);
-    emscripten_set_main_loop_timing(EM_TIMING_RAF, 1);
+    emscripten_main_loop = fun;
+    emscripten_set_main_loop(main_loop_wrapper, 0, 1);
 }
