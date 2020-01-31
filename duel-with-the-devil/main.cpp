@@ -1,5 +1,7 @@
 #ifdef _WIN32
 #include <Windows.h>
+// SDL_main doesn't seem to work with VS2015
+#undef main
 #else
 #define OutputDebugString(x)
 #endif
@@ -7,9 +9,9 @@
 #include <stdio.h>
 #ifdef __EMSCRIPTEN__
 #include <emscripten/emscripten.h>
-#include "SDL.h"
-#include "SDL_image.h"
-#include "SDL/SDL_mixer.h"
+#include <SDL2/SDL.h>
+// #include <SDL2/SDL_image.h>
+// #include <SDL2/SDL_mixer.h>
 #elif defined _WIN32
 #include "SDL/SDL.h"
 #include "SDL/SDL_image.h"
@@ -20,14 +22,150 @@
 #include "SDL2/SDL_mixer.h"
 #endif
 
-// SDL_main doesn't seem to work with VS2015
-#undef main
 
-// Oh god a global. Sue me.
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+// Render scale
 int scale = 2;
 
+
+EM_JS(const char *, create_audio, (const char *pathCstr), {
+    var path = UTF8ToString(pathCstr);
+
+    var sound = document.createElement('audio');
+    sound.src = path;
+    sound.id = path;
+    sound.setAttribute('preload', 'auto');
+    sound.setAttribute('controls', 'none');
+    sound.style.display = 'none';
+    document.body.appendChild(sound);
+
+    return pathCstr;
+});
+
+EM_JS(void, play_sound, (const char *pathCstr), {
+    var path = UTF8ToString(pathCstr);
+    var sound = document.getElementById(path);
+
+    sound.loop = false;
+    sound.currentTime = 0;
+    sound.play();
+});
+
+EM_JS(void, play_music, (const char *pathCstr, bool loop), {
+    var path = UTF8ToString(pathCstr);
+    var music = document.getElementById(path);
+
+    var currentSong = document.body.getAttribute('current-song');
+    if (currentSong && currentSong != '')
+        document.getElementById(currentSong).pause();
+
+    music.loop = loop;
+    music.volume = 1;
+    music.currentTime = 0.0;
+    music.play();
+    document.body.setAttribute('current-song', path);
+});
+
+EM_JS(void, fade_out_music, (int speed), {
+    // Music has to be playing
+    var currentSong = document.body.getAttribute('current-song');
+    if (!currentSong || currentSong == '') return;
+    var music = document.getElementById(currentSong);
+
+    // Use setInterval to reduce volume to 0
+    var volume = 1.0;
+    var interval = setInterval(() => {
+        if (vol > 0) {
+            volume -= 0.1;
+            music.volume = volume.toFixed(2);
+        } else {
+            clearInterval(interval);
+            document.body.setAttribute('current-song', null);
+            music.pause();
+        }
+    }, 1000 / speed);
+});
+
+EM_JS(void, fade_in_music, (const char *pathCstr, int speed), {
+    var path = UTF8ToString(pathCstr);
+    var music = document.getElementById(path);
+    var currentSong = document.body.getAttribute('current-song');
+
+    // Stop any currently-playing music
+    var currentSong = document.body.getAttribute('current-song');
+    if (currentSong && currentSong != '')
+        document.getElementById(currentSong).pause();
+
+    // Play new song starting at 0 volume
+    music.loop = true;
+    music.volume = 0.01;
+    music.currentTime = 0.0;
+    music.play();
+    document.body.setAttribute('current-song', path);
+
+    // Gradually increase volume
+    var volume = 0.0;
+    var interval = setInterval(() => {
+        if (vol > 1) {
+            music.volume = 1;
+            clearInterval(interval);
+        } else {
+            volume += 0.1;
+            music.volume = volume.toFixed(2);
+        }
+    }, 1000 / speed);
+});
+
+EM_JS(bool, music_is_playing, (), {
+    var currentSong = document.body.getAttribute('current-song');
+
+    if (!currentSong || currentSong == '') return false;
+
+    var music = document.getElementById(currentSong);
+    return !music.paused && !music.ended;
+});
+
+
+
+// COPIED FROM https://wiki.libsdl.org/SDL_CreateRGBSurfaceWithFormatFrom
+SDL_Surface *load_image(const char *filename) {
+    int req_format = STBI_rgb_alpha;
+    int width, height, orig_format;
+    unsigned char* data = stbi_load(filename, &width, &height, &orig_format, req_format);
+    if (data == NULL) {
+        SDL_Log("Loading image failed: %s", stbi_failure_reason());
+        exit(100);
+    }
+
+    int depth, pitch;
+    Uint32 pixel_format;
+    if (req_format == STBI_rgb) {
+        depth = 24;
+        pitch = 3*width; // 3 bytes per pixel * pixels per row
+        pixel_format = SDL_PIXELFORMAT_RGB24;
+    } else { // STBI_rgb_alpha (RGBA)
+        depth = 32;
+        pitch = 4*width;
+        pixel_format = SDL_PIXELFORMAT_RGBA32;
+    }
+
+    SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormatFrom((void*)data, width, height,
+            depth, pitch, pixel_format);
+
+    if (surf == NULL) {
+        SDL_Log("Creating surface failed: %s", SDL_GetError());
+        stbi_image_free(data);
+        exit(100);
+    }
+
+    return surf;
+}
+
+
 void ChangeColorTo(SDL_Surface* surface, Uint32 color) {
-    if (surface->format->BytesPerPixel != 4) exit(5);
+    if (surface->format->BytesPerPixel != 4) exit(surface->format->BytesPerPixel);
 
     for (int x = 0; x < surface->w; x++) for (int y = 0; y < surface->h; y++)
     {
@@ -52,22 +190,22 @@ struct Textures {
 };
 
 struct Musics {
-    Mix_Music* ominous;
-    Mix_Music* ominous2;
-    Mix_Music* dark;
-    Mix_Music* death;
-    Mix_Music* boss;
-    Mix_Music* gameover;
+    const char *ominous;
+    const char *ominous2;
+    const char *dark;
+    const char *death;
+    const char *boss;
+    const char *gameover;
 };
 
 struct Sounds {
-    Mix_Chunk* move;
-    Mix_Chunk* jump;
-    Mix_Chunk* swipe;
-    Mix_Chunk* crouch;
-    Mix_Chunk* clash1;
-    Mix_Chunk* clash2;
-    Mix_Chunk* kill;
+    const char *move;
+    const char *jump;
+    const char *swipe;
+    const char *crouch;
+    const char *clash1;
+    const char *clash2;
+    const char *kill;
 };
 
 enum Controls { UP, DOWN, LEFT, RIGHT };
@@ -305,7 +443,7 @@ struct Player {
                 case GO_UP:
                     if (cell_y == ground_level) {
                         cell_y -= 1;
-                        Mix_PlayChannel(2, sfx->jump, 0);
+                        play_sound(sfx->jump);
                     }
                     else {
                         cell_y = ground_level;
@@ -316,7 +454,7 @@ struct Player {
                     if (previous_action == GO_DOWN)
                         frame = 1;
                     else
-                        Mix_PlayChannel(3, sfx->crouch, 0);
+                        play_sound(sfx->crouch);
                     if (cell_y == ground_level)
                     { }
                     else {
@@ -329,11 +467,11 @@ struct Player {
                     if (previous_action != GO_DOWN)
                         flipped = true;
                     if (cell_y < ground_level) {
-                        Mix_PlayChannel(4, sfx->swipe, 0);
+                        play_sound(sfx->swipe);
                         cell_y = ground_level;
                     }
                     else
-                        Mix_PlayChannel(1, sfx->move, 0);
+                        play_sound(sfx->move);
                     if (cell_x < 1) { }
                     break;
 
@@ -343,10 +481,10 @@ struct Player {
                         flipped = false;
                     if (cell_y < ground_level) {
                         cell_y = ground_level;
-                        Mix_PlayChannel(4, sfx->swipe, 0);
+                        play_sound(sfx->swipe);
                     }
                     else
-                        Mix_PlayChannel(1, sfx->move, 0);
+                        play_sound(sfx->move);
                     if (cell_x > 5) {}
                     break;
 
@@ -636,10 +774,10 @@ void collide_players(Player* p1, Player* p2, Sounds* sfx) {
     if (!collision) collision = walk_into_another(p2, p1, &loser);
 
     if (collision == CLASH) {
-        Mix_Chunk* clash;
+        const char* clash;
         if (rand() % 10 > 5) clash = sfx->clash1;
         else clash = sfx->clash2;
-        Mix_PlayChannel(5, clash, 0);
+        play_sound(clash);
     }
     else if (collision == KILL) {
         loser->die();
@@ -1113,8 +1251,8 @@ bool fading_in_blank;
 bool fading_out_blank;
 int fade_alpha;
 
-Mix_Music* fade_music_to;
-Mix_Music* current_music;
+const char* fade_music_to = NULL;
+const char* current_music = NULL;
 
 // Man this is getting insane
 bool played_death_music;
@@ -1221,9 +1359,9 @@ void loop() {
         collide_players(&player, &enemy, &sfx);
 
         if (player.dead && !player_was_dead) {
-            Mix_PlayChannel(7, sfx.kill, 0);
+            play_sound(sfx.kill);
             if (!enemy.boss) {
-                Mix_PlayMusic(music.death, 0);
+                play_music(music.death, false);
                 played_death_music = true;
             }
             enemy.win();
@@ -1234,14 +1372,14 @@ void loop() {
             fade_timeout = 60;
         }
         if (enemy.dead && !enemy_was_dead) {
-            Mix_PlayChannel(7, sfx.kill, 0);
+            play_sound(sfx.kill);
             player.win();
             enemy_was_dead = true;
 
             if (stage == 7) {
                 if (enemy.boss) {
                     player_wins = true;
-                    Mix_PlayMusic(music.gameover, 0);
+                    play_music(music.gameover, false);
                 }
                 else {
                     enemy.boss = true;
@@ -1312,7 +1450,7 @@ void loop() {
                 fading_out_blank = true;
 
                 if (played_death_music) {
-                    Mix_PlayMusic(current_music, -1);
+                    play_music(current_music, true);
                     played_death_music = false;
                 }
                 else if (stage == 4 && !player.devil) {
@@ -1321,7 +1459,7 @@ void loop() {
 
                     // Red sky
                     SDL_DestroyTexture(tex.background);
-                    temp_surface = IMG_Load("assets/redsky.png");
+                    temp_surface = load_image("assets/redsky.png");
                     tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
                     SDL_FreeSurface(temp_surface);
 
@@ -1344,20 +1482,20 @@ void loop() {
                     // Load up the big man skin.
                     SDL_FreeSurface(enemy_surface);
                     SDL_FreeSurface(enemy_swoosh);
-                    enemy_surface = IMG_Load("assets/player/boss.png");
-                    enemy_swoosh = IMG_Load("assets/player/boss_swoosh.png");
+                    enemy_surface = load_image("assets/player/boss.png");
+                    enemy_swoosh = load_image("assets/player/boss_swoosh.png");
                     enemy.refresh_texture(renderer, enemy_surface, enemy_swoosh, 0);
                     enemy.horns_tex = tex.boss_horns;
 
                     // Final sky.
                     SDL_DestroyTexture(tex.background);
-                    temp_surface = IMG_Load("assets/finalsky.png");
+                    temp_surface = load_image("assets/finalsky.png");
                     tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
                     SDL_FreeSurface(temp_surface);
 
                     // Final mountain.
                     SDL_DestroyTexture(tex.platform);
-                    temp_surface = IMG_Load("assets/finalmountain.png");
+                    temp_surface = load_image("assets/finalmountain.png");
                     tex.platform = SDL_CreateTextureFromSurface(renderer, temp_surface);
                     SDL_FreeSurface(temp_surface);
 
@@ -1409,12 +1547,12 @@ void loop() {
     // ===================== Handle Music Transition =================
     if (fade_music_to) {
         if (current_music) {
-            Mix_FadeOutMusic(boss_initialized ? 100 : 500);
+            fade_out_music(boss_initialized ? 100 : 500);
             current_music = NULL;
         }
-        else if (!Mix_PlayingMusic()) {
+        else if (!music_is_playing()) {
             current_music = fade_music_to;
-            Mix_FadeInMusic(current_music, -1, boss_initialized ? 100 : 500);
+            fade_in_music(current_music, boss_initialized ? 100 : 500);
             fade_music_to = NULL;
         }
     }
@@ -1438,17 +1576,22 @@ int main() {
     if (SDL_Init(SDL_INIT_VIDEO) < 0) { exit(99); }
     if (SDL_GetNumAudioDrivers() == 0) { printf("No fuckin' audio drivers\n"); }
     printf("Audio drivers: %s, %s, %s\n", SDL_GetAudioDriver(0), SDL_GetAudioDriver(1), SDL_GetAudioDriver(2));
-    if ((Mix_Init(MIX_INIT_OGG) & MIX_INIT_OGG) != MIX_INIT_OGG) { exit(2); }
-    Mix_AllocateChannels(15);
 
     FILE* f = fopen("assets/test.txt", "r");
     char word[60];
     fscanf(f, "%s", word);
-    printf("OK`: %s\n", word);
+    printf("Test file contents: %s\n", word);
     fclose(f);
 
+    // =============== SDL and asset stuff ==================
+    window_width = 720;
+    window_height = 512;
+    stage = 0;
+    ai_function = stages[stage];
+    ai_data = calloc(128, 1);
+
     window = SDL_CreateWindow(
-        "A Duel With the Devil",
+        "Duel",
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
         window_width, window_height, 0
     );
@@ -1457,69 +1600,67 @@ int main() {
         exit(98);
     }
     else printf("uhhh we're in?\n");
-    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    renderer = SDL_CreateRenderer(window, -1, 0);
     SDL_SetRenderDrawColor(renderer, 165, 226, 216, 255);
 
     memset(&last_controls, 0, sizeof(last_controls));
     memset(&controls, 0, sizeof(controls));
 
     // =================== Load Some Assets ===================
-    player_surface = IMG_Load("assets/player/player.png");
-    enemy_surface  = IMG_Load("assets/player/player.png");
+    player_surface = load_image("assets/player/player.png");
+    enemy_surface  = load_image("assets/player/player.png");
 
-    temp_surface = IMG_Load("assets/sky.png");
+    temp_surface = load_image("assets/sky.png");
     tex.background = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
-    temp_surface = IMG_Load("assets/mountain.png");
+    temp_surface = load_image("assets/mountain.png");
     tex.platform = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
-    temp_surface = IMG_Load("assets/blank.png");
+    temp_surface = load_image("assets/blank.png");
     tex.blank = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
-    temp_surface = IMG_Load("assets/player/sword.png");
+    temp_surface = load_image("assets/player/sword.png");
     tex.sword = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
-    temp_surface = IMG_Load("assets/player/horns.png");
+    temp_surface = load_image("assets/player/horns.png");
     tex.horns = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
-    temp_surface = IMG_Load("assets/player/bosshorns.png");
+    temp_surface = load_image("assets/player/bosshorns.png");
     tex.boss_horns = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
-    temp_surface = IMG_Load("assets/thanksforplaying.png");
+    temp_surface = load_image("assets/thanksforplaying.png");
     tex.thanks_for_playing = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_FreeSurface(temp_surface);
 
-    player_swoosh = IMG_Load("assets/player/swoosh.png");
-    enemy_swoosh  = IMG_Load("assets/player/swoosh.png");
+    player_swoosh = load_image("assets/player/swoosh.png");
+    enemy_swoosh  = load_image("assets/player/swoosh.png");
 
-    temp_surface = IMG_Load("assets/clouds.png");
+    temp_surface = load_image("assets/clouds.png");
     tex.cloud = SDL_CreateTextureFromSurface(renderer, temp_surface);
     SDL_SetTextureAlphaMod(tex.cloud, 155);
     SDL_FreeSurface(temp_surface);
 
-    if (Mix_OpenAudio(MIX_DEFAULT_FREQUENCY, MIX_DEFAULT_FORMAT, MIX_DEFAULT_CHANNELS, 2048) == -1)
-        exit(3);
-    music.ominous  = Mix_LoadMUS("assets/music/ominous.ogg");
-    music.ominous2 = Mix_LoadMUS("assets/music/ominous2.ogg");
-    music.dark     = Mix_LoadMUS("assets/music/dark.ogg");
-    music.death    = Mix_LoadMUS("assets/music/death.ogg");
-    music.boss     = Mix_LoadMUS("assets/music/finalboss.ogg");
-    music.gameover = Mix_LoadMUS("assets/music/gameover.ogg");
-    Mix_PlayMusic(music.ominous, -1);
+    music.ominous  = create_audio("music/ominous.ogg");
+    music.ominous2 = create_audio("music/ominous2.ogg");
+    music.dark     = create_audio("music/dark.ogg");
+    music.death    = create_audio("music/death.ogg");
+    music.boss     = create_audio("music/finalboss.ogg");
+    music.gameover = create_audio("music/gameover.ogg");
+    play_music(music.ominous, true);
 
-    sfx.move   = Mix_LoadWAV("assets/sfx/move.wav");
-    sfx.jump   = Mix_LoadWAV("assets/sfx/jump.wav");
-    sfx.swipe  = Mix_LoadWAV("assets/sfx/swipe.wav");
-    sfx.crouch = Mix_LoadWAV("assets/sfx/crouch.wav");
-    sfx.clash1 = Mix_LoadWAV("assets/sfx/clash1.wav");
-    sfx.clash2 = Mix_LoadWAV("assets/sfx/clash2.wav");
-    sfx.kill   = Mix_LoadWAV("assets/sfx/kill.wav");
+    sfx.move   = create_audio("sfx/move.wav");
+    sfx.jump   = create_audio("sfx/jump.wav");
+    sfx.swipe  = create_audio("sfx/swipe.wav");
+    sfx.crouch = create_audio("sfx/crouch.wav");
+    sfx.clash1 = create_audio("sfx/clash1.wav");
+    sfx.clash2 = create_audio("sfx/clash2.wav");
+    sfx.kill   = create_audio("sfx/kill.wav");
 
     // ====================== Initialize Things That Do Stuff ======================
     Player tempplr(renderer, player_surface, player_swoosh, &tex, &sfx, 0);
@@ -1555,13 +1696,6 @@ int main() {
     player_wins = false;
 
     player_just_moved = false;
-
-    // =============== SDL and asset stuff ==================
-    window_width = 720;
-    window_height = 512;
-    stage = 0;
-    ai_function = stages[stage];
-    ai_data = calloc(128, 1);
 
 
     // ============ Stuff for game loop management ===============
