@@ -60,12 +60,32 @@ void ruby_p(mrb_state *mrb, mrb_value obj, int prompt) {
   putc('\n', stdout);
 }
 
-void ruby_check_for_exception(mrb_state *mrb, const char *context) {
+bool ruby_check_for_exception(mrb_state *mrb, const char *context) {
     if (mrb->exc) {
         printf("ERROR in %s: \n", context);
         ruby_p(mrb, mrb_obj_value(mrb->exc), 0);
         mrb->exc = NULL;
+        return true;
     }
+    return false;
+}
+
+
+// This is janky because of emscripten
+// From https://stackoverflow.com/a/14002993
+void load_script(const char *filename, mrb_state *mrb) {
+    FILE *f = fopen(filename, "rb");
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);  /* same as rewind(f); */
+
+    char *string = (char*)calloc(fsize + 1, 1);
+    fread(string, 1, fsize, f);
+    fclose(f);
+
+    mrb_load_nstring(mrb, string, fsize);
+
+    free(string);
 }
 
 
@@ -229,6 +249,14 @@ struct Player {
     mrb_value act_block;
     mrb_value act_fiber;
 
+    // Action symbols
+    mrb_sym sym_go_forward;
+    mrb_sym sym_go_backward;
+    mrb_sym sym_pursue;
+    mrb_sym sym_guard;
+    mrb_sym sym_jump;
+    mrb_sym sym_stay;
+
     // The cell_y value of the ground.
     const int ground_level = 2;
 
@@ -274,17 +302,23 @@ struct Player {
         mrb_value toplevel = mrb_obj_value(mrb->top_self);
         DATA_PTR(toplevel) = (void*)this;
 
-        // Define always-accessible methods
+        // Set up action symbols
+        sym_go_forward = mrb_intern_lit(mrb, "go_forward");
+        sym_go_backward = mrb_intern_lit(mrb, "go_backward");
+        sym_pursue = mrb_intern_lit(mrb, "pursue");
+        sym_guard = mrb_intern_lit(mrb, "guard");
+        sym_jump = mrb_intern_lit(mrb, "jump");
+        sym_stay = mrb_intern_lit(mrb, "stay");
+
+        // TODO define opponent methods
         mrb_define_method(mrb, mrb->object_class, "act", mruby_act, MRB_ARGS_BLOCK());
-        mrb_define_method(mrb, mrb->object_class, "go_forward!", mruby_go_forward, MRB_ARGS_NONE());
-        mrb_define_method(mrb, mrb->object_class, "go_backward!", mruby_go_backward, MRB_ARGS_NONE());
-        mrb_define_method(mrb, mrb->object_class, "pursue!", mruby_pursue, MRB_ARGS_NONE());
-        mrb_define_method(mrb, mrb->object_class, "guard!", mruby_guard, MRB_ARGS_NONE());
-        mrb_define_method(mrb, mrb->object_class, "jump!", mruby_jump, MRB_ARGS_NONE());
-        mrb_define_method(mrb, mrb->object_class, "stay!", mruby_stay, MRB_ARGS_NONE());
+
+        // Run the commands script
+        load_script("assets/commands.rb", mrb);
     }
 
     void create_new_act_fiber() {
+        printf("NEW FIBER\n");
         mrb_value toplevel = mrb_obj_value(mrb->object_class);
         mrb_value fiber_class = mrb_const_get(mrb, toplevel, mrb_intern_lit(mrb, "Fiber"));
         act_fiber = mrb_funcall_with_block(mrb, fiber_class, mrb_intern_lit(mrb, "new"), 0, NULL, act_block);
@@ -299,20 +333,9 @@ struct Player {
     void load_script_file(const char *filename) {
         setup_mruby();
 
-        FILE *file = fopen(filename, "r");
-        if (file == NULL) {
-            printf("INVALID SCRIPT FILE %s\n", filename);
-            return;
-        }
-
-#ifdef __EMSCRIPTEN__
-        printf("I am emscripten and can't load a ruby file\n");
-#else
-        mrb_load_file(mrb, file);
-#endif
+        load_script(filename, mrb);
         ruby_check_for_exception(mrb, filename);
         printf("Loaded %s\n", filename);
-        fclose(file);
     }
 
     Player() {
@@ -666,48 +689,6 @@ mrb_value mruby_act(mrb_state* mrb, mrb_value self) {
 
     return mrb_nil_value();
 }
-mrb_value mruby_go_forward(mrb_state* mrb, mrb_value self) {
-    Player *player = (Player *)DATA_PTR(self);
-    printf("mruby_go_forward\n");
-    
-    ruby_check_for_exception(mrb, "mruby_go_forward");
-    return mrb_nil_value();
-}
-mrb_value mruby_go_backward(mrb_state* mrb, mrb_value self) {
-    Player *player = (Player *)DATA_PTR(self);
-    printf("mruby_go_backward\n");
-    
-    ruby_check_for_exception(mrb, "mruby_go_backward");
-    return mrb_nil_value();
-}
-mrb_value mruby_pursue(mrb_state* mrb, mrb_value self) {
-    Player *player = (Player *)DATA_PTR(self);
-    printf("mruby_pursue\n");
-    
-    ruby_check_for_exception(mrb, "mruby_pursue");
-    return mrb_nil_value();
-}
-mrb_value mruby_guard(mrb_state* mrb, mrb_value self) {
-    Player *player = (Player *)DATA_PTR(self);
-    printf("mruby_guard\n");
-    
-    ruby_check_for_exception(mrb, "mruby_guard");
-    return mrb_nil_value();
-}
-mrb_value mruby_jump(mrb_state* mrb, mrb_value self) {
-    Player *player = (Player *)DATA_PTR(self);
-    printf("mruby_jump\n");
-    
-    ruby_check_for_exception(mrb, "mruby_jump");
-    return mrb_nil_value();
-}
-mrb_value mruby_stay(mrb_state* mrb, mrb_value self) {
-    Player *player = (Player *)DATA_PTR(self);
-    printf("mruby_stay\n");
-    
-    ruby_check_for_exception(mrb, "mruby_stay");
-    return mrb_nil_value();
-}
 
 // ======================================= Player Collision ======================================
 enum CollisionResult { NO_COLLISION = 0, CLASH, KILL };
@@ -928,7 +909,55 @@ void keyboard_ai(Player* player, Player* other_player, void* rawdata) {
 // ============================ Ruby AI Function ==========================
 
 void ruby_ai(Player* player, Player* other_player, void* rawdata) {
-    // TODO
+    // Only run ruby code when timeout is up
+    if (player->action_timeout > 0) return;
+
+    mrb_value action;
+    mrb_value opponent_obj = mrb_nil_value(); // TODO
+    mrb_value alive = mrb_fiber_alive_p(player->mrb, player->act_fiber);
+
+    printf("RUBY AI\n");
+
+    // Renew the fiber if necessary
+    if (!mrb_true_p(alive)) player->create_new_act_fiber();
+
+    action = mrb_fiber_resume(player->mrb, player->act_fiber, 1, &opponent_obj);
+
+    mrb_sym action_sym;
+
+    if (mrb_symbol_p(action)) {
+        action_sym = mrb_symbol(action);
+    }
+    else {
+        printf("BAD ACTION (not a symbol)\n");
+        if (ruby_check_for_exception(player->mrb, "ruby_ai")) {
+            return;
+        }
+        ruby_p(player->mrb, action, 0);
+        return;
+    }
+
+    if (action_sym == player->sym_go_forward) {
+        player->next_action = (player->side == LEFT_SIDE) ? GO_RIGHT : GO_LEFT;
+    }
+    else if (action_sym == player->sym_go_backward) {
+        player->next_action = (player->side == LEFT_SIDE) ? GO_LEFT : GO_RIGHT;
+    }
+    else if (action_sym == player->sym_pursue) {
+        player->next_action = (player->cell_x > other_player->cell_x) ? GO_LEFT : GO_RIGHT;
+    }
+    else if (action_sym == player->sym_guard) {
+        player->next_action = GO_DOWN;
+    }
+    else if (action_sym == player->sym_jump) {
+        player->next_action = GO_UP;
+    }
+    else if (action_sym == player->sym_stay) {
+        player->next_action = NONE;
+    }
+    else {
+        printf("BAD ACTION (wrong symbol)\n");
+    }
 }
 
 // ============================ Classic AI Functions ==========================
@@ -1625,10 +1654,6 @@ int main(int argc, char **argv) {
     window_width = 720;
     window_height = 512;
     stage = 0;
-    enemy_ai_function = stages[stage];
-    player_ai_function = keyboard_ai;
-    enemy_ai_data = calloc(128, 1);
-    player_ai_data = calloc(128, 1);
 
     window = SDL_CreateWindow(
         "Duel",
@@ -1718,13 +1743,21 @@ int main(int argc, char **argv) {
     memset(moved_from, 0, sizeof(moved_from));
 
     // === Load ruby scripts from command line ===
-    // TODO emscripten?
     if (argc > 1) {
         enemy.load_script_file(argv[1]);
     }
     if (argc > 2) {
         player.load_script_file(argv[2]);
     }
+
+    // AI function (based on whether scripts were loaded or not)
+    if (enemy.has_ruby_ai()) enemy_ai_function = ruby_ai;
+    else                     enemy_ai_function = stages[stage];
+    player_ai_function = keyboard_ai;
+    if (player.has_ruby_ai()) player_ai_function = ruby_ai;
+    else                      player_ai_function = keyboard_ai;
+    enemy_ai_data = calloc(128, 1);
+    player_ai_data = calloc(128, 1);
 
     // === INITIALIZING GARBAGE ===
 

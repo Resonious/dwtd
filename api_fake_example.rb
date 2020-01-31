@@ -7,5 +7,5 @@
 
 act do |enemy|
   go_forward!
-  wait! 12
+  30.times { stay! }
 end
