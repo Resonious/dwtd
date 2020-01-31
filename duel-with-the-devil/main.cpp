@@ -23,6 +23,7 @@
 #include "native_adapter.h"
 #endif
 
+#include "mruby.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"

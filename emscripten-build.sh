@@ -22,6 +22,7 @@ emcc duel-with-the-devil/main.cpp \
   -s ALLOW_MEMORY_GROWTH=1 \
   -s USE_SDL=2 \
   -s ASSERTIONS=2 \
+  -I./duel-with-the-devil/mruby/include \
   -L./duel-with-the-devil/mruby/build/wasm/lib \
   -lmruby \
   -o web/pub/dwtd.html \
