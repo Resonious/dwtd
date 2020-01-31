@@ -137,8 +137,6 @@ struct Player {
     bool killer;
     bool action_done;
     bool boss;
-    // Used to log behavior for final battle
-    int*** training;
 
     // The cell_y value of the ground.
     const int ground_level = 2;
@@ -160,48 +158,6 @@ struct Player {
         winner = false;
         killer = false;
         action_done = false;
-    }
-
-    // NOTE not even going to try and clean this up in the destructor.
-    void initialize_training_data() {
-        // Here's the plan:
-        // action = training[X_DIST][Y_DIST][ENEMY_ACTION]
-        training = (int***)malloc(5 * sizeof(void*)) + 2;
-        for (int i = -2; i < 3; i++) {
-            training[i] = (int**)malloc(5 * sizeof(void*)) + 2;
-            for (int j = -2; j < 3; j++) {
-                training[i][j] = (int*)malloc(NONE * sizeof(Actions));
-                for (int k = 0; k < NONE; k++) {
-                    training[i][j][k] = UNSPECIFIED;
-                }
-            }
-        }
-    }
-
-    Actions predict_action_from(Player* other) {
-        if (current_action < 0) return UNSPECIFIED;
-
-        int x_dist = other->cell_x - cell_x;
-        if (abs(x_dist) > 2) return UNSPECIFIED;
-
-        int y_dist = other->cell_y - cell_y;
-        if (abs(y_dist) > 2) return UNSPECIFIED;
-
-        return (Actions)training[x_dist][y_dist][current_action];
-    }
-
-    void train_against(Player* other) {
-        int x_dist = other->cell_x - cell_x;
-        if (abs(x_dist) > 2) return;
-
-        if (x_dist > 0 && next_action == GO_LEFT) return;
-        if (x_dist < 0 && next_action == GO_RIGHT) return;
-
-        int y_dist = other->cell_y - cell_y;
-        if (abs(y_dist) > 2) return;
-
-        // Just overwrite the previous... Maybe do weights if there's time/incentive.
-        training[x_dist][y_dist][other->current_action] = next_action;
     }
 
     Player() {
@@ -1033,7 +989,7 @@ void neural_ai(Player* player, Player* other_player, void* rawdata) {
     }
 
     if (abs(other_player->cell_x - player->cell_x) <= 2) {
-        player->next_action = other_player->predict_action_from(player);
+        player->next_action = UNSPECIFIED; // NOTE this used to be training..
         if (player->next_action == UNSPECIFIED) {
             if (player->current_action != GO_DOWN && rand() % 10 > 5)
                 player->next_action = GO_DOWN;
@@ -1102,7 +1058,7 @@ void boss_ai(Player* player, Player* other_player, void* rawdata) {
             player->next_action = GO_UP;
         }
         else {
-            player->next_action = other_player->predict_action_from(player);
+            player->next_action = UNSPECIFIED; // NOTE this used to be training
             if (player->next_action == UNSPECIFIED) {
                 if (player->current_action != GO_DOWN && rand() % 10 > 5)
                     player->next_action = GO_DOWN;
@@ -1248,8 +1204,6 @@ void loop() {
     else if (controls[UP]    && !moved_from[UP])    player.next_action = GO_UP;
     else if (controls[DOWN]  && !moved_from[DOWN])  player.next_action = GO_DOWN;
     else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
-
-    if (!enemy.devil && player.action_timeout == 1) player.train_against(&enemy);
 
     // ========================== Game Logic =====================
     if (!fading_out_blank) {
@@ -1561,7 +1515,6 @@ int main() {
     memcpy(&player, &tempplr, sizeof(Player));
     memcpy(&enemy, &tempenm, sizeof(Player));
 
-    player.initialize_training_data();
     enemy.cell_x = 6;
     enemy.flipped = true;
 
