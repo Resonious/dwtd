@@ -1,0 +1,3 @@
+[submodule "duel-with-the-devil/mruby"]
+	path = duel-with-the-devil/mruby
+	url = https://github.com/mruby/mruby
