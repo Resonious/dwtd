@@ -57,32 +57,32 @@ EM_JS(void, play_music, (const char *pathCstr, bool loop), {
     var path = UTF8ToString(pathCstr);
     var music = document.getElementById(path);
 
-    var currentSong = document.body.getAttribute('current-song');
-    if (currentSong && currentSong != '')
+    var currentSong = window.currentSong;
+    if (currentSong != null && currentSong != '')
         document.getElementById(currentSong).pause();
 
     music.loop = loop;
     music.volume = 1;
     music.currentTime = 0.0;
     music.play();
-    document.body.setAttribute('current-song', path);
+    window.currentSong = path;
 });
 
 EM_JS(void, fade_out_music, (int speed), {
     // Music has to be playing
-    var currentSong = document.body.getAttribute('current-song');
-    if (!currentSong || currentSong == '') return;
+    var currentSong = window.currentSong;
+    if (currentSong == null || currentSong == '') return;
     var music = document.getElementById(currentSong);
 
     // Use setInterval to reduce volume to 0
     var volume = 1.0;
     var interval = setInterval(() => {
-        if (vol > 0) {
+        if (volume > 0) {
             volume -= 0.1;
             music.volume = volume.toFixed(2);
         } else {
             clearInterval(interval);
-            document.body.setAttribute('current-song', null);
+            window.currentSong = null;
             music.pause();
         }
     }, 1000 / speed);
@@ -91,11 +91,10 @@ EM_JS(void, fade_out_music, (int speed), {
 EM_JS(void, fade_in_music, (const char *pathCstr, int speed), {
     var path = UTF8ToString(pathCstr);
     var music = document.getElementById(path);
-    var currentSong = document.body.getAttribute('current-song');
+    var currentSong = window.currentSong;
 
     // Stop any currently-playing music
-    var currentSong = document.body.getAttribute('current-song');
-    if (currentSong && currentSong != '')
+    if (currentSong != null && currentSong != '')
         document.getElementById(currentSong).pause();
 
     // Play new song starting at 0 volume
@@ -103,12 +102,12 @@ EM_JS(void, fade_in_music, (const char *pathCstr, int speed), {
     music.volume = 0.01;
     music.currentTime = 0.0;
     music.play();
-    document.body.setAttribute('current-song', path);
+    window.currentSong = path;
 
     // Gradually increase volume
     var volume = 0.0;
     var interval = setInterval(() => {
-        if (vol > 1) {
+        if (volume > 1) {
             music.volume = 1;
             clearInterval(interval);
         } else {
@@ -119,11 +118,13 @@ EM_JS(void, fade_in_music, (const char *pathCstr, int speed), {
 });
 
 EM_JS(bool, music_is_playing, (), {
-    var currentSong = document.body.getAttribute('current-song');
+    var currentSong = window.currentSong;
 
-    if (!currentSong || currentSong == '') return false;
+    if (currentSong == null || currentSong == '')
+        return false;
 
     var music = document.getElementById(currentSong);
+
     return !music.paused && !music.ended;
 });
 
@@ -1558,11 +1559,13 @@ void loop() {
     }
 
     // ======================= Cap Framerate =====================
-    Uint64 frame_end = SDL_GetPerformanceCounter();
-    Uint64 frame_ms = (frame_end - frame_start) * milliseconds_per_tick;
 
-    if (frame_ms < 17)
-        SDL_Delay(17 - frame_ms);
+    //Uint64 frame_end = SDL_GetPerformanceCounter();
+    //Uint64 frame_ms = (frame_end - frame_start) * milliseconds_per_tick;
+
+    // TODO I don't know if this works at all
+    //if (frame_ms < 17)
+    //    SDL_Delay(17 - frame_ms);
 }
 
 #define exit(x) { printf("EXITING WITH CODE %i\n", x); exit(x); }
@@ -1709,6 +1712,7 @@ int main() {
     printf("Error? %s\n", SDL_GetError());
 
     emscripten_set_main_loop(loop, 0, 1);
+    emscripten_set_main_loop_timing(EM_TIMING_RAF, 1);
 
     return 0;
 }
