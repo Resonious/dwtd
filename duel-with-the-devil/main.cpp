@@ -7,19 +7,20 @@
 #endif
 
 #include <stdio.h>
+
 #ifdef __EMSCRIPTEN__
-#include <emscripten/emscripten.h>
+#include "emscripten_adapter.h"
 #include <SDL2/SDL.h>
-// #include <SDL2/SDL_image.h>
-// #include <SDL2/SDL_mixer.h>
+
 #elif defined _WIN32
 #include "SDL/SDL.h"
-#include "SDL/SDL_image.h"
 #include "SDL/SDL_mixer.h"
+#include "native_adapter.h"
+
 #else
 #include "SDL2/SDL.h"
-#include "SDL2/SDL_image.h"
 #include "SDL2/SDL_mixer.h"
+#include "native_adapter.h"
 #endif
 
 
@@ -28,106 +29,6 @@
 
 // Render scale
 int scale = 2;
-
-
-EM_JS(const char *, create_audio, (const char *pathCstr), {
-    var path = UTF8ToString(pathCstr);
-
-    var sound = document.createElement('audio');
-    sound.src = path;
-    sound.id = path;
-    sound.setAttribute('preload', 'auto');
-    sound.setAttribute('controls', 'none');
-    sound.style.display = 'none';
-    document.body.appendChild(sound);
-
-    return pathCstr;
-});
-
-EM_JS(void, play_sound, (const char *pathCstr), {
-    var path = UTF8ToString(pathCstr);
-    var sound = document.getElementById(path);
-
-    sound.loop = false;
-    sound.currentTime = 0;
-    sound.play();
-});
-
-EM_JS(void, play_music, (const char *pathCstr, bool loop), {
-    var path = UTF8ToString(pathCstr);
-    var music = document.getElementById(path);
-
-    var currentSong = window.currentSong;
-    if (currentSong != null && currentSong != '')
-        document.getElementById(currentSong).pause();
-
-    music.loop = loop;
-    music.volume = 1;
-    music.currentTime = 0.0;
-    music.play();
-    window.currentSong = path;
-});
-
-EM_JS(void, fade_out_music, (int speed), {
-    // Music has to be playing
-    var currentSong = window.currentSong;
-    if (currentSong == null || currentSong == '') return;
-    var music = document.getElementById(currentSong);
-
-    // Use setInterval to reduce volume to 0
-    var volume = 1.0;
-    var interval = setInterval(() => {
-        if (volume > 0) {
-            volume -= 0.1;
-            music.volume = volume.toFixed(2);
-        } else {
-            clearInterval(interval);
-            window.currentSong = null;
-            music.pause();
-        }
-    }, 1000 / speed);
-});
-
-EM_JS(void, fade_in_music, (const char *pathCstr, int speed), {
-    var path = UTF8ToString(pathCstr);
-    var music = document.getElementById(path);
-    var currentSong = window.currentSong;
-
-    // Stop any currently-playing music
-    if (currentSong != null && currentSong != '')
-        document.getElementById(currentSong).pause();
-
-    // Play new song starting at 0 volume
-    music.loop = true;
-    music.volume = 0.01;
-    music.currentTime = 0.0;
-    music.play();
-    window.currentSong = path;
-
-    // Gradually increase volume
-    var volume = 0.0;
-    var interval = setInterval(() => {
-        if (volume > 1) {
-            music.volume = 1;
-            clearInterval(interval);
-        } else {
-            volume += 0.1;
-            music.volume = volume.toFixed(2);
-        }
-    }, 1000 / speed);
-});
-
-EM_JS(bool, music_is_playing, (), {
-    var currentSong = window.currentSong;
-
-    if (currentSong == null || currentSong == '')
-        return false;
-
-    var music = document.getElementById(currentSong);
-
-    return !music.paused && !music.ended;
-});
-
 
 
 // COPIED FROM https://wiki.libsdl.org/SDL_CreateRGBSurfaceWithFormatFrom
@@ -191,22 +92,22 @@ struct Textures {
 };
 
 struct Musics {
-    const char *ominous;
-    const char *ominous2;
-    const char *dark;
-    const char *death;
-    const char *boss;
-    const char *gameover;
+    MusicClip *ominous;
+    MusicClip *ominous2;
+    MusicClip *dark;
+    MusicClip *death;
+    MusicClip *boss;
+    MusicClip *gameover;
 };
 
 struct Sounds {
-    const char *move;
-    const char *jump;
-    const char *swipe;
-    const char *crouch;
-    const char *clash1;
-    const char *clash2;
-    const char *kill;
+    SoundClip *move;
+    SoundClip *jump;
+    SoundClip *swipe;
+    SoundClip *crouch;
+    SoundClip *clash1;
+    SoundClip *clash2;
+    SoundClip *kill;
 };
 
 enum Controls { UP, DOWN, LEFT, RIGHT };
@@ -775,7 +676,7 @@ void collide_players(Player* p1, Player* p2, Sounds* sfx) {
     if (!collision) collision = walk_into_another(p2, p1, &loser);
 
     if (collision == CLASH) {
-        const char* clash;
+        SoundClip* clash;
         if (rand() % 10 > 5) clash = sfx->clash1;
         else clash = sfx->clash2;
         play_sound(clash);
@@ -1252,8 +1153,8 @@ bool fading_in_blank;
 bool fading_out_blank;
 int fade_alpha;
 
-const char* fade_music_to = NULL;
-const char* current_music = NULL;
+MusicClip* fade_music_to = NULL;
+MusicClip* current_music = NULL;
 
 // Man this is getting insane
 bool played_death_music;
@@ -1293,7 +1194,6 @@ void* ai_data;
 
 // ============ Stuff for game loop management ===============
 SDL_Event event;
-Uint64 milliseconds_per_tick;
 int key_count;
 const Uint8* keys = SDL_GetKeyboardState(&key_count);
 // If we press and release a key while player is still cooling down from movement, we
@@ -1303,8 +1203,6 @@ bool keys_pressed_since_move[4];
 
 void loop() {
     // ============= Frame Setup =================
-    Uint64 frame_start = SDL_GetPerformanceCounter();
-
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
         case SDL_QUIT: exit(0); break;
@@ -1557,15 +1455,6 @@ void loop() {
             fade_music_to = NULL;
         }
     }
-
-    // ======================= Cap Framerate =====================
-
-    //Uint64 frame_end = SDL_GetPerformanceCounter();
-    //Uint64 frame_ms = (frame_end - frame_start) * milliseconds_per_tick;
-
-    // TODO I don't know if this works at all
-    //if (frame_ms < 17)
-    //    SDL_Delay(17 - frame_ms);
 }
 
 #define exit(x) { printf("EXITING WITH CODE %i\n", x); exit(x); }
@@ -1649,21 +1538,21 @@ int main() {
     SDL_SetTextureAlphaMod(tex.cloud, 155);
     SDL_FreeSurface(temp_surface);
 
-    music.ominous  = create_audio("music/ominous.ogg");
-    music.ominous2 = create_audio("music/ominous2.ogg");
-    music.dark     = create_audio("music/dark.ogg");
-    music.death    = create_audio("music/death.ogg");
-    music.boss     = create_audio("music/finalboss.ogg");
-    music.gameover = create_audio("music/gameover.ogg");
+    music.ominous  = create_music("music/ominous.ogg");
+    music.ominous2 = create_music("music/ominous2.ogg");
+    music.dark     = create_music("music/dark.ogg");
+    music.death    = create_music("music/death.ogg");
+    music.boss     = create_music("music/finalboss.ogg");
+    music.gameover = create_music("music/gameover.ogg");
     play_music(music.ominous, true);
 
-    sfx.move   = create_audio("sfx/move.wav");
-    sfx.jump   = create_audio("sfx/jump.wav");
-    sfx.swipe  = create_audio("sfx/swipe.wav");
-    sfx.crouch = create_audio("sfx/crouch.wav");
-    sfx.clash1 = create_audio("sfx/clash1.wav");
-    sfx.clash2 = create_audio("sfx/clash2.wav");
-    sfx.kill   = create_audio("sfx/kill.wav");
+    sfx.move   = create_sound("sfx/move.wav");
+    sfx.jump   = create_sound("sfx/jump.wav");
+    sfx.swipe  = create_sound("sfx/swipe.wav");
+    sfx.crouch = create_sound("sfx/crouch.wav");
+    sfx.clash1 = create_sound("sfx/clash1.wav");
+    sfx.clash2 = create_sound("sfx/clash2.wav");
+    sfx.kill   = create_sound("sfx/kill.wav");
 
     // ====================== Initialize Things That Do Stuff ======================
     Player tempplr(renderer, player_surface, player_swoosh, &tex, &sfx, 0);
@@ -1702,17 +1591,13 @@ int main() {
 
 
     // ============ Stuff for game loop management ===============
-    milliseconds_per_tick = 1000 / SDL_GetPerformanceFrequency();
-    // keys = SDL_GetKeyboardState(&key_count);
-
     // If we press and release a key while player is still cooling down from movement, we
     // want to use that key.
     reserve_action = UNSPECIFIED;
 
     printf("Error? %s\n", SDL_GetError());
 
-    emscripten_set_main_loop(loop, 0, 1);
-    emscripten_set_main_loop_timing(EM_TIMING_RAF, 1);
+    start_looping(loop);
 
     return 0;
 }
