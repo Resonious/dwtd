@@ -24,12 +24,49 @@
 #endif
 
 #include "mruby.h"
+#include "mruby/data.h"
+#include "mruby/compile.h"
+#include "mruby/string.h"
+#include "mruby/variable.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+
+#define keyreleased(ctl) (controls[ctl] && !last_controls[ctl])
+#define keypressed(ctl) (!controls[ctl] && last_controls[ctl])
+#define NUM_CLOUDS 15
+
 // Render scale
 int scale = 2;
+
+// Pasted in from crattlecrute which pasted it in from mirb code lol.
+void ruby_p(mrb_state *mrb, mrb_value obj, int prompt) {
+  mrb_value val;
+
+  val = mrb_funcall(mrb, obj, "inspect", 0);
+  if (prompt) {
+    if (!mrb->exc) {
+      fputs(" => ", stdout);
+    }
+    else {
+      val = mrb_funcall(mrb, mrb_obj_value(mrb->exc), "inspect", 0);
+    }
+  }
+  if (!mrb_string_p(val)) {
+    val = mrb_obj_as_string(mrb, obj);
+  }
+  fwrite(RSTRING_PTR(val), RSTRING_LEN(val), 1, stdout);
+  putc('\n', stdout);
+}
+
+void ruby_check_for_exception(mrb_state *mrb, const char *context) {
+    if (mrb->exc) {
+        printf("ERROR in %s: \n", context);
+        ruby_p(mrb, mrb_obj_value(mrb->exc), 0);
+        mrb->exc = NULL;
+    }
+}
 
 
 // COPIED FROM https://wiki.libsdl.org/SDL_CreateRGBSurfaceWithFormatFrom
@@ -111,9 +148,58 @@ struct Sounds {
     SoundClip *kill;
 };
 
+// Cloud struct
+struct Cloud {
+    SDL_Texture* tex;
+    SDL_Rect rect;
+    int speed;
+    int move_timeout;
+    int frame;
+    int screen_width;
+
+    void initialize(int screen_width, int screen_height, SDL_Texture* tex) {
+        this->tex = tex;
+        this->screen_width = screen_width;
+        rect = {
+            (rand() % screen_width) - 128*scale, screen_height - rand() % (72*scale),
+            128 * scale, 64 * scale
+        };
+        if (rand() % 10 > 7) rect.y -= 80;
+        frame = rand() % 4;
+        speed = rand() % 5;
+        move_timeout = 0;
+    }
+
+    void render(SDL_Renderer* renderer) {
+        SDL_Rect src = { 128 * frame, 0, 128, 64 };
+        SDL_RenderCopy(renderer, tex, &src, &rect);
+
+        if (move_timeout > 0)
+            move_timeout -= 1;
+        else {
+            rect.x += 1;
+            move_timeout = 10 - speed;
+
+            if (rect.x > screen_width)
+                rect.x = -128 * scale;
+        }
+    }
+};
+
 enum Controls { UP, DOWN, LEFT, RIGHT };
 enum Actions { UNSPECIFIED, GO_UP, GO_DOWN, GO_LEFT, GO_RIGHT, NONE };
+enum Sides { LEFT_SIDE, RIGHT_SIDE };
 
+// Prototypes for ruby methods
+mrb_value mruby_act(mrb_state* mrb, mrb_value self);
+mrb_value mruby_go_forward(mrb_state* mrb, mrb_value self);
+mrb_value mruby_go_backward(mrb_state* mrb, mrb_value self);
+mrb_value mruby_pursue(mrb_state* mrb, mrb_value self);
+mrb_value mruby_guard(mrb_state* mrb, mrb_value self);
+mrb_value mruby_jump(mrb_state* mrb, mrb_value self);
+mrb_value mruby_stay(mrb_state* mrb, mrb_value self);
+
+// Player struct
 struct Player {
     SDL_Texture* tex;
     SDL_Texture* swoosh_tex;
@@ -137,6 +223,11 @@ struct Player {
     bool killer;
     bool action_done;
     bool boss;
+    Sides side;
+    // Per-player mruby state
+    mrb_state *mrb = NULL;
+    mrb_value act_block;
+    mrb_value act_fiber;
 
     // The cell_y value of the ground.
     const int ground_level = 2;
@@ -158,6 +249,70 @@ struct Player {
         winner = false;
         killer = false;
         action_done = false;
+        side = LEFT_SIDE;
+        if (mruby_is_setup())
+            create_new_act_fiber();
+    }
+
+    void teardown_mruby() {
+        if (mrb) mrb_close(mrb);
+        mrb = NULL;
+        act_block = mrb_nil_value();
+        act_fiber = mrb_nil_value();
+    }
+
+    void setup_mruby() {
+        // First, open the mruby context
+        teardown_mruby();
+        mrb = mrb_open();
+        if (!mrb) {
+            printf("mruby failed to open\n");
+            exit(332);
+        }
+
+        // Next, set up necessary classes/methods
+        mrb_value toplevel = mrb_obj_value(mrb->top_self);
+        DATA_PTR(toplevel) = (void*)this;
+
+        // Define always-accessible methods
+        mrb_define_method(mrb, mrb->object_class, "act", mruby_act, MRB_ARGS_BLOCK());
+        mrb_define_method(mrb, mrb->object_class, "go_forward!", mruby_go_forward, MRB_ARGS_NONE());
+        mrb_define_method(mrb, mrb->object_class, "go_backward!", mruby_go_backward, MRB_ARGS_NONE());
+        mrb_define_method(mrb, mrb->object_class, "pursue!", mruby_pursue, MRB_ARGS_NONE());
+        mrb_define_method(mrb, mrb->object_class, "guard!", mruby_guard, MRB_ARGS_NONE());
+        mrb_define_method(mrb, mrb->object_class, "jump!", mruby_jump, MRB_ARGS_NONE());
+        mrb_define_method(mrb, mrb->object_class, "stay!", mruby_stay, MRB_ARGS_NONE());
+    }
+
+    void create_new_act_fiber() {
+        mrb_value toplevel = mrb_obj_value(mrb->object_class);
+        mrb_value fiber_class = mrb_const_get(mrb, toplevel, mrb_intern_lit(mrb, "Fiber"));
+        act_fiber = mrb_funcall_with_block(mrb, fiber_class, mrb_intern_lit(mrb, "new"), 0, NULL, act_block);
+
+        ruby_check_for_exception(mrb, "Creating 'act' fiber");
+    }
+
+    bool mruby_is_setup() {
+        return mrb != NULL;
+    }
+
+    void load_script_file(const char *filename) {
+        setup_mruby();
+
+        FILE *file = fopen(filename, "r");
+        if (file == NULL) {
+            printf("INVALID SCRIPT FILE %s\n", filename);
+            return;
+        }
+
+#ifdef __EMSCRIPTEN__
+        printf("I am emscripten and can't load a ruby file\n");
+#else
+        mrb_load_file(mrb, file);
+#endif
+        ruby_check_for_exception(mrb, filename);
+        printf("Loaded %s\n", filename);
+        fclose(file);
     }
 
     Player() {
@@ -174,6 +329,7 @@ struct Player {
         sword_tex  = textures->sword;
         horns_tex  = textures->horns;
         sfx        = sounds;
+        teardown_mruby();
         initialize();
         devil = false;
         boss = false;
@@ -182,6 +338,10 @@ struct Player {
     ~Player() {
         SDL_DestroyTexture(tex);
         SDL_DestroyTexture(swoosh_tex);
+    }
+
+    bool has_ruby_ai() {
+        return mruby_is_setup() && !mrb_nil_p(act_fiber);
     }
 
     void refresh_texture(SDL_Renderer* rend, SDL_Surface* surface, SDL_Surface* swoosh_surf, Uint32 color) {
@@ -491,43 +651,63 @@ struct Player {
         if (devil || boss) SDL_RenderCopyEx(renderer, horns_tex, &src, &dest, angle, &center, sdl_flip());
     }
 };
+// End of Player struct
 
-struct Cloud {
-    SDL_Texture* tex;
-    SDL_Rect rect;
-    int speed;
-    int move_timeout;
-    int frame;
-    int screen_width;
+// Ruby method implementations
+mrb_value mruby_act(mrb_state* mrb, mrb_value self) {
+    printf("mruby_act\n");
+    Player *player = (Player *)DATA_PTR(self);
 
-    void initialize(int screen_width, int screen_height, SDL_Texture* tex) {
-        this->tex = tex;
-        this->screen_width = screen_width;
-        rect = {
-            (rand() % screen_width) - 128*scale, screen_height - rand() % (72*scale),
-            128 * scale, 64 * scale
-        };
-        if (rand() % 10 > 7) rect.y -= 80;
-        frame = rand() % 4;
-        speed = rand() % 5;
-        move_timeout = 0;
-    }
+    // Store the block and construct the fiber
+    printf("Pre-mrb_get_args\n");
+    mrb_get_args(mrb, "&", &player->act_block);
+    player->create_new_act_fiber();
+    ruby_check_for_exception(mrb, "mruby_act");
 
-    void render(SDL_Renderer* renderer) {
-        SDL_Rect src = { 128 * frame, 0, 128, 64 };
-        SDL_RenderCopy(renderer, tex, &src, &rect);
-
-        if (move_timeout > 0)
-            move_timeout -= 1;
-        else {
-            rect.x += 1;
-            move_timeout = 10 - speed;
-
-            if (rect.x > screen_width)
-                rect.x = -128 * scale;
-        }
-    }
-};
+    return mrb_nil_value();
+}
+mrb_value mruby_go_forward(mrb_state* mrb, mrb_value self) {
+    Player *player = (Player *)DATA_PTR(self);
+    printf("mruby_go_forward\n");
+    
+    ruby_check_for_exception(mrb, "mruby_go_forward");
+    return mrb_nil_value();
+}
+mrb_value mruby_go_backward(mrb_state* mrb, mrb_value self) {
+    Player *player = (Player *)DATA_PTR(self);
+    printf("mruby_go_backward\n");
+    
+    ruby_check_for_exception(mrb, "mruby_go_backward");
+    return mrb_nil_value();
+}
+mrb_value mruby_pursue(mrb_state* mrb, mrb_value self) {
+    Player *player = (Player *)DATA_PTR(self);
+    printf("mruby_pursue\n");
+    
+    ruby_check_for_exception(mrb, "mruby_pursue");
+    return mrb_nil_value();
+}
+mrb_value mruby_guard(mrb_state* mrb, mrb_value self) {
+    Player *player = (Player *)DATA_PTR(self);
+    printf("mruby_guard\n");
+    
+    ruby_check_for_exception(mrb, "mruby_guard");
+    return mrb_nil_value();
+}
+mrb_value mruby_jump(mrb_state* mrb, mrb_value self) {
+    Player *player = (Player *)DATA_PTR(self);
+    printf("mruby_jump\n");
+    
+    ruby_check_for_exception(mrb, "mruby_jump");
+    return mrb_nil_value();
+}
+mrb_value mruby_stay(mrb_state* mrb, mrb_value self) {
+    Player *player = (Player *)DATA_PTR(self);
+    printf("mruby_stay\n");
+    
+    ruby_check_for_exception(mrb, "mruby_stay");
+    return mrb_nil_value();
+}
 
 // ======================================= Player Collision ======================================
 enum CollisionResult { NO_COLLISION = 0, CLASH, KILL };
@@ -646,7 +826,112 @@ void collide_players(Player* p1, Player* p2, Sounds* sfx) {
     }
 }
 
-// ============================ Enemy AI Functions ==========================
+// ============ Fun globals ================
+
+// Stuff for managing scene transitions
+bool player_was_dead;
+bool enemy_was_dead;
+int fade_timeout;
+bool fading_in_blank;
+bool fading_out_blank;
+int fade_alpha;
+
+MusicClip* fade_music_to = NULL;
+MusicClip* current_music = NULL;
+
+// Man this is getting insane
+bool played_death_music;
+bool boss_initialized;
+bool player_wins;
+
+bool player_just_moved;
+// Unfortunately, this control idea is tricky if we don't want the player to move twice
+// every time you press a button once...
+bool moved_from[4];
+
+Player player;
+Player enemy;
+
+// =============== SDL and asset stuff ==================
+SDL_Window* window;
+int window_width , window_height;
+SDL_Renderer* renderer;
+SDL_Surface* player_surface;
+SDL_Surface* player_swoosh;
+SDL_Surface* enemy_surface;
+SDL_Surface* enemy_swoosh;
+SDL_Surface* temp_surface;
+Textures tex;
+Musics music;
+Sounds sfx;
+bool last_controls[4];
+bool controls[4];
+Cloud clouds[NUM_CLOUDS];
+int stage;
+void(*player_ai_function)(Player*, Player*, void*);
+void* player_ai_data;
+void(*enemy_ai_function)(Player*, Player*, void*);
+void* enemy_ai_data;
+
+// ============ Stuff for game loop management ===============
+SDL_Event event;
+int key_count;
+const Uint8* keys = SDL_GetKeyboardState(&key_count);
+// If we press and release a key while player is still cooling down from movement, we
+// want to use that key.
+Actions reserve_action = UNSPECIFIED;
+bool keys_pressed_since_move[4];
+
+// ============================ Input AI Function ==========================
+
+// ... This isn't really an "AI"
+void keyboard_ai(Player* player, Player* other_player, void* rawdata) {
+    controls[UP]    = keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W];
+    controls[DOWN]  = keys[SDL_SCANCODE_DOWN]  || keys[SDL_SCANCODE_S];
+    controls[LEFT]  = keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A];
+    controls[RIGHT] = keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D];
+
+    if (moved_from[UP] && !controls[UP]) moved_from[UP] = false;
+    if (moved_from[DOWN] && !controls[DOWN]) controls[DOWN] = false;
+    if (moved_from[LEFT] && !controls[LEFT]) controls[LEFT] = false;
+    if (moved_from[RIGHT] && !controls[RIGHT]) controls[RIGHT] = false;
+
+    if (player->moved && player->frame_counter > 0) {
+        if (keys_pressed_since_move[RIGHT]) {
+            if (keyreleased(RIGHT)) reserve_action = GO_RIGHT;
+        }
+        else keys_pressed_since_move[RIGHT] = keypressed(RIGHT);
+
+        if (keys_pressed_since_move[LEFT]) {
+            if (keyreleased(LEFT)) reserve_action = GO_LEFT;
+        }
+        else keys_pressed_since_move[LEFT] = keypressed(LEFT);
+
+        if (keys_pressed_since_move[UP]) {
+            if (keyreleased(UP)) reserve_action = GO_UP;
+        }
+        else keys_pressed_since_move[UP] = keypressed(UP);
+
+        if (keys_pressed_since_move[DOWN]) {
+            if (keyreleased(DOWN)) reserve_action = GO_DOWN;
+        }
+        else keys_pressed_since_move[DOWN] = keypressed(DOWN);
+    }
+
+    if      (controls[RIGHT] && !moved_from[RIGHT]) player->next_action = GO_RIGHT;
+    else if (controls[LEFT]  && !moved_from[LEFT])  player->next_action = GO_LEFT;
+    else if (controls[UP]    && !moved_from[UP])    player->next_action = GO_UP;
+    else if (controls[DOWN]  && !moved_from[DOWN])  player->next_action = GO_DOWN;
+    else if (reserve_action != UNSPECIFIED) player->next_action = reserve_action;
+}
+
+// ============================ Ruby AI Function ==========================
+
+void ruby_ai(Player* player, Player* other_player, void* rawdata) {
+    // TODO
+}
+
+// ============================ Classic AI Functions ==========================
 
 void dummy_ai(Player* player, Player* other_player, void* rawdata) {
 }
@@ -1093,70 +1378,16 @@ void boss_ai(Player* player, Player* other_player, void* rawdata) {
     }
 }
 
-#define keyreleased(ctl) (controls[ctl] && !last_controls[ctl])
-#define keypressed(ctl) (!controls[ctl] && last_controls[ctl])
-#define NUM_CLOUDS 15
-
 bool any(bool controls[4]) {
     return controls[0] || controls[1] || controls[2] || controls[3];
 }
 
 
-// Stuff for managing scene transitions
-bool player_was_dead;
-bool enemy_was_dead;
-int fade_timeout;
-bool fading_in_blank;
-bool fading_out_blank;
-int fade_alpha;
-
-MusicClip* fade_music_to = NULL;
-MusicClip* current_music = NULL;
-
-// Man this is getting insane
-bool played_death_music;
-bool boss_initialized;
-bool player_wins;
-
-bool player_just_moved;
-// Unfortunately, this control idea is tricky if we don't want the player to move twice
-// every time you press a button once...
-bool moved_from[4];
-
-Player player;
-Player enemy;
-
-// =============== SDL and asset stuff ==================
-SDL_Window* window;
-int window_width , window_height;
-SDL_Renderer* renderer;
-SDL_Surface* player_surface;
-SDL_Surface* player_swoosh;
-SDL_Surface* enemy_surface;
-SDL_Surface* enemy_swoosh;
-SDL_Surface* temp_surface;
-Textures tex;
-Musics music;
-Sounds sfx;
-bool last_controls[4];
-bool controls[4];
-Cloud clouds[NUM_CLOUDS];
 void(*stages[])(Player*, Player*, void*) = {
     dummy_ai, patrol_ai, berserk_ai, slickster_ai, sneaky_ai,
     observant_ai, sentinel_ai, neural_ai
 };
-int stage;
-void(*ai_function)(Player*, Player*, void*);
-void* ai_data;
 
-// ============ Stuff for game loop management ===============
-SDL_Event event;
-int key_count;
-const Uint8* keys = SDL_GetKeyboardState(&key_count);
-// If we press and release a key while player is still cooling down from movement, we
-// want to use that key.
-Actions reserve_action = UNSPECIFIED;
-bool keys_pressed_since_move[4];
 
 void loop() {
     // ============= Frame Setup =================
@@ -1166,48 +1397,10 @@ void loop() {
         }
     }
 
-    // ====================== Input Processing / Control Logic ========================
-    controls[UP]    = keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W];
-    controls[DOWN]  = keys[SDL_SCANCODE_DOWN]  || keys[SDL_SCANCODE_S];
-    controls[LEFT]  = keys[SDL_SCANCODE_LEFT]  || keys[SDL_SCANCODE_A];
-    controls[RIGHT] = keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D];
-
-    if (moved_from[UP] && !controls[UP]) moved_from[UP] = false;
-    if (moved_from[DOWN] && !controls[DOWN]) controls[DOWN] = false;
-    if (moved_from[LEFT] && !controls[LEFT]) controls[LEFT] = false;
-    if (moved_from[RIGHT] && !controls[RIGHT]) controls[RIGHT] = false;
-
-    if (player.moved && player.frame_counter > 0) {
-        if (keys_pressed_since_move[RIGHT]) {
-            if (keyreleased(RIGHT)) reserve_action = GO_RIGHT;
-        }
-        else keys_pressed_since_move[RIGHT] = keypressed(RIGHT);
-
-        if (keys_pressed_since_move[LEFT]) {
-            if (keyreleased(LEFT)) reserve_action = GO_LEFT;
-        }
-        else keys_pressed_since_move[LEFT] = keypressed(LEFT);
-
-        if (keys_pressed_since_move[UP]) {
-            if (keyreleased(UP)) reserve_action = GO_UP;
-        }
-        else keys_pressed_since_move[UP] = keypressed(UP);
-
-        if (keys_pressed_since_move[DOWN]) {
-            if (keyreleased(DOWN)) reserve_action = GO_DOWN;
-        }
-        else keys_pressed_since_move[DOWN] = keypressed(DOWN);
-    }
-
-    if      (controls[RIGHT] && !moved_from[RIGHT]) player.next_action = GO_RIGHT;
-    else if (controls[LEFT]  && !moved_from[LEFT])  player.next_action = GO_LEFT;
-    else if (controls[UP]    && !moved_from[UP])    player.next_action = GO_UP;
-    else if (controls[DOWN]  && !moved_from[DOWN])  player.next_action = GO_DOWN;
-    else if (reserve_action != UNSPECIFIED) player.next_action = reserve_action;
-
     // ========================== Game Logic =====================
     if (!fading_out_blank) {
-        ai_function(&enemy, &player, ai_data);
+        player_ai_function(&player, &enemy, player_ai_data);
+        enemy_ai_function(&enemy, &player, enemy_ai_data);
         player.update();
         enemy.update();
         collide_players(&player, &enemy, &sfx);
@@ -1221,8 +1414,6 @@ void loop() {
             enemy.win();
             player_was_dead = true;
 
-            if (stage < sizeof(stages) / sizeof(void*) - 1)
-                stage -= 1;
             fade_timeout = 60;
         }
         if (enemy.dead && !enemy_was_dead) {
@@ -1239,7 +1430,8 @@ void loop() {
                     enemy.boss = true;
                 }
             }
-            else stage += 1;
+            else if (!enemy.has_ruby_ai())
+                stage += 1;
 
             fade_timeout = 60;
         }
@@ -1290,10 +1482,16 @@ void loop() {
             if (fade_alpha >= enemy.boss ? 300 : 260) {
                 // Re-initialize shit
                 reserve_action = UNSPECIFIED;
-                ai_function = stages[stage];
-                memset(ai_data, 0, 128);
+                if (player.has_ruby_ai()) player_ai_function = ruby_ai;
+                else                      player_ai_function = keyboard_ai;
+                if (enemy.has_ruby_ai()) enemy_ai_function = ruby_ai;
+                else                     enemy_ai_function = stages[stage];
+                memset(enemy_ai_data, 0, 128);
+                memset(player_ai_data, 0, 128);
                 player.initialize();
+                player.side = LEFT_SIDE;
                 enemy.initialize();
+                enemy.side = RIGHT_SIDE;
                 enemy.cell_x = 6;
                 enemy.flipped = true;
                 player_was_dead = false;
@@ -1357,7 +1555,7 @@ void loop() {
                     for (int i = 0; i < NUM_CLOUDS; i++)
                         clouds[i].speed = 10;
 
-                    ai_function = boss_ai;
+                    enemy_ai_function = boss_ai;
 
                     boss_initialized = true;
                 }
@@ -1417,25 +1615,20 @@ void loop() {
 #ifdef _WIN32
 int WinMain(HINSTANCE hinst, HINSTANCE prev, LPSTR cmdline, int cmdshow) {
 #else
-int main() {
+int main(int argc, char **argv) {
 #endif
-    if (SDL_Init(SDL_INIT_AUDIO) < 0) { exit(1); }
+    if (SDL_Init(SDL_INIT_AUDIO) < 0) { exit(88); }
     if (SDL_Init(SDL_INIT_VIDEO) < 0) { exit(99); }
-    if (SDL_GetNumAudioDrivers() == 0) { printf("No fuckin' audio drivers\n"); }
-    printf("Audio drivers: %s, %s, %s\n", SDL_GetAudioDriver(0), SDL_GetAudioDriver(1), SDL_GetAudioDriver(2));
-
-    FILE* f = fopen("assets/test.txt", "r");
-    char word[60];
-    fscanf(f, "%s", word);
-    printf("Test file contents: %s\n", word);
-    fclose(f);
+    if (SDL_GetNumAudioDrivers() == 0) { printf("No audio drivers\n"); }
 
     // =============== SDL and asset stuff ==================
     window_width = 720;
     window_height = 512;
     stage = 0;
-    ai_function = stages[stage];
-    ai_data = calloc(128, 1);
+    enemy_ai_function = stages[stage];
+    player_ai_function = keyboard_ai;
+    enemy_ai_data = calloc(128, 1);
+    player_ai_data = calloc(128, 1);
 
     window = SDL_CreateWindow(
         "Duel",
@@ -1523,6 +1716,15 @@ int main() {
 
     memset(keys_pressed_since_move, 0, sizeof(keys));
     memset(moved_from, 0, sizeof(moved_from));
+
+    // === Load ruby scripts from command line ===
+    // TODO emscripten?
+    if (argc > 1) {
+        enemy.load_script_file(argv[1]);
+    }
+    if (argc > 2) {
+        player.load_script_file(argv[2]);
+    }
 
     // === INITIALIZING GARBAGE ===
 

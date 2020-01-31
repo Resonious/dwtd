@@ -1,3 +1,7 @@
+gems = lambda do |conf|
+  conf.gem core: 'mruby-fiber'
+end
+
 MRuby::Build.new do |conf|
   # load specific toolchain settings
 
@@ -7,6 +11,8 @@ MRuby::Build.new do |conf|
   else
     toolchain :gcc
   end
+
+  gems.call conf
 
   # Turn on `enable_debug` for better debugging
   # enable_debug
@@ -106,6 +112,8 @@ MRuby::Build.new('host-debug') do |conf|
   # Generate mruby debugger command (require mruby-eval)
   conf.gem :core => "mruby-bin-debugger"
 
+  gems.call conf
+
   # bintest
   # conf.enable_bintest
 end
@@ -122,6 +130,8 @@ MRuby::Build.new('test') do |conf|
   conf.enable_bintest
   conf.enable_test
 
+  gems.call conf
+
   #conf.gembox 'default'
 end
 
@@ -136,6 +146,8 @@ MRuby::CrossBuild.new('wasm') do |conf|
     archiver.command = 'emcc'
     archiver.archive_options = '%{objs} -s WASM=1 -o %{outfile}'
   end
+
+  gems.call conf
 end
 
 #MRuby::Build.new('bench') do |conf|

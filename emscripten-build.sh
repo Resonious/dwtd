@@ -10,11 +10,7 @@ function copy_assets_back {
 }
 trap copy_assets_back EXIT
 
-# Build mruby
-if !(cd duel-with-the-devil/mruby && rake); then
-  echo "mruby build failed"
-  exit 123
-fi
+sh build-mruby.sh
 
 # Build the game
 emcc duel-with-the-devil/main.cpp \

@@ -34,7 +34,7 @@ EM_JS(void, play_music, (const char *pathCstr, bool loop), {
     var music = document.getElementById(path);
 
     var currentSong = window.currentSong;
-    if (currentSong != null && currentSong != '')
+    if (currentSong != null && currentSong != "")
         document.getElementById(currentSong).pause();
 
     music.loop = loop;
@@ -47,7 +47,7 @@ EM_JS(void, play_music, (const char *pathCstr, bool loop), {
 EM_JS(void, fade_out_music, (int speed), {
     // Music has to be playing
     var currentSong = window.currentSong;
-    if (currentSong == null || currentSong == '') return;
+    if (currentSong == null || currentSong == "") return;
     var music = document.getElementById(currentSong);
 
     // Use setInterval to reduce volume to 0
@@ -70,7 +70,7 @@ EM_JS(void, fade_in_music, (const char *pathCstr, int speed), {
     var currentSong = window.currentSong;
 
     // Stop any currently-playing music
-    if (currentSong != null && currentSong != '')
+    if (currentSong != null && currentSong != "")
         document.getElementById(currentSong).pause();
 
     // Play new song starting at 0 volume
@@ -96,7 +96,7 @@ EM_JS(void, fade_in_music, (const char *pathCstr, int speed), {
 EM_JS(bool, music_is_playing, (), {
     var currentSong = window.currentSong;
 
-    if (currentSong == null || currentSong == '')
+    if (currentSong == null || currentSong == "")
         return false;
 
     var music = document.getElementById(currentSong);
