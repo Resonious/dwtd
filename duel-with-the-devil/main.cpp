@@ -338,6 +338,13 @@ struct Player {
         printf("Loaded %s\n", filename);
     }
 
+    void load_script_text(const char *text) {
+        setup_mruby();
+
+        mrb_load_string(mrb, text);
+        ruby_check_for_exception(mrb, "Loading script from text");
+    }
+
     Player() {
     }
 
@@ -1743,12 +1750,7 @@ int main(int argc, char **argv) {
     memset(moved_from, 0, sizeof(moved_from));
 
     // === Load ruby scripts from command line ===
-    if (argc > 1) {
-        enemy.load_script_file(argv[1]);
-    }
-    if (argc > 2) {
-        player.load_script_file(argv[2]);
-    }
+    load_player_scripts();
 
     // AI function (based on whether scripts were loaded or not)
     if (enemy.has_ruby_ai()) enemy_ai_function = ruby_ai;

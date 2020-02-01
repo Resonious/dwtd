@@ -23,4 +23,6 @@ emcc duel-with-the-devil/main.cpp \
   -lmruby \
   -o web/pub/dwtd.html \
   --preload-file assets
+
 # IF YOU DON'T WANT WASM FOR SOME REASON: -s WASM=0 
+# IF YOU DON'T TRUST THE LINKER: -s ERROR_ON_UNDEFINED_SYMBOLS=0

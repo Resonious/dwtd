@@ -122,3 +122,30 @@ void start_looping(void (*fun)()) {
     emscripten_main_loop = fun;
     emscripten_set_main_loop(main_loop_wrapper, 0, 1);
 }
+
+
+EM_JS(char *, js_script_contents, (int player_num), {
+    var script = document.getElementById("player-"+player_num+"-script");
+    if (script) {
+        console.log(script.text);
+        var ptr = allocate(intArrayFromString(script.text), 'i8', ALLOC_NORMAL);
+        return ptr;
+    }
+    else {
+        return 0;
+    }
+});
+
+#define load_player_scripts() { \
+    char *p1 = js_script_contents(1); \
+    char *p2 = js_script_contents(2); \
+ \
+    if (p1) { \
+        player.load_script_text(p1); \
+        free(p1); \
+    } \
+    if (p2) { \
+        enemy.load_script_text(p2); \
+        free(p2); \
+    } \
+}

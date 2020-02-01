@@ -75,3 +75,12 @@ void start_looping(void (*fun)()) {
             SDL_Delay(17 - frame_ms);
     }
 }
+
+
+#define load_player_scripts() \
+    if (argc > 1) { \
+        enemy.load_script_file(argv[1]); \
+    } \
+    if (argc > 2) { \
+        player.load_script_file(argv[2]); \
+    }
