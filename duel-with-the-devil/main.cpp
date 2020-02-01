@@ -17,6 +17,9 @@
 #include "SDL/SDL_mixer.h"
 #include "native_adapter.h"
 
+#elif defined HEADLESS
+#include "headless_adapter.h"
+
 #else
 #include "SDL2/SDL.h"
 #include "SDL2/SDL_mixer.h"
@@ -256,6 +259,7 @@ struct Player {
     mrb_sym sym_guard;
     mrb_sym sym_jump;
     mrb_sym sym_stay;
+    mrb_sym sym_resume;
 
     // The cell_y value of the ground.
     const int ground_level = 2;
@@ -309,6 +313,7 @@ struct Player {
         sym_guard = mrb_intern_lit(mrb, "guard");
         sym_jump = mrb_intern_lit(mrb, "jump");
         sym_stay = mrb_intern_lit(mrb, "stay");
+        sym_resume = mrb_intern_lit(mrb, "resume");
 
         // TODO define opponent methods
         mrb_define_method(mrb, mrb->object_class, "act", mruby_act, MRB_ARGS_BLOCK());
@@ -917,7 +922,7 @@ void keyboard_ai(Player* player, Player* other_player, void* rawdata) {
 
 void ruby_ai(Player* player, Player* other_player, void* rawdata) {
     // Only run ruby code when timeout is up
-    if (player->action_timeout > 0) return;
+    if (player->action_timeout > 1) return;
 
     mrb_value action;
     mrb_value opponent_obj = mrb_nil_value(); // TODO
@@ -925,10 +930,18 @@ void ruby_ai(Player* player, Player* other_player, void* rawdata) {
 
     printf("RUBY AI\n");
 
-    // Renew the fiber if necessary
-    if (!mrb_true_p(alive)) player->create_new_act_fiber();
+    // Resume the fiber
+    action = mrb_funcall_argv(player->mrb, player->act_fiber, player->sym_resume, 1, &opponent_obj);
 
-    action = mrb_fiber_resume(player->mrb, player->act_fiber, 1, &opponent_obj);
+    // Fiber returns nil when it ends.
+    // If it is nil and no longer alive, we want to renew it.
+    if (mrb_nil_p(action)) {
+        mrb_value alive = mrb_fiber_alive_p(player->mrb, player->act_fiber);
+        if (!mrb_true_p(alive)) {
+            player->create_new_act_fiber();
+            action = mrb_funcall_argv(player->mrb, player->act_fiber, player->sym_resume, 1, &opponent_obj);
+        }
+    }
 
     mrb_sym action_sym;
 
@@ -1742,6 +1755,7 @@ int main(int argc, char **argv) {
 
     enemy.cell_x = 6;
     enemy.flipped = true;
+    enemy.side = RIGHT_SIDE;
 
     for (int i = 0; i < NUM_CLOUDS; i++)
         clouds[i].initialize(window_width, window_height, tex.cloud);

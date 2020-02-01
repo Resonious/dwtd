@@ -14,6 +14,7 @@ MRuby::Build.new do |conf|
   end
 
   gems.call conf
+  conf.gem core: 'mruby-bin-mirb'
 
   # Turn on `enable_debug` for better debugging
   # enable_debug
