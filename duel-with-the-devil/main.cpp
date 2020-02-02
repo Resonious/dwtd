@@ -31,6 +31,7 @@
 #include "mruby/compile.h"
 #include "mruby/string.h"
 #include "mruby/variable.h"
+#include "mruby/class.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -215,12 +216,15 @@ enum Sides { LEFT_SIDE, RIGHT_SIDE };
 
 // Prototypes for ruby methods
 mrb_value mruby_act(mrb_state* mrb, mrb_value self);
-mrb_value mruby_go_forward(mrb_state* mrb, mrb_value self);
-mrb_value mruby_go_backward(mrb_state* mrb, mrb_value self);
-mrb_value mruby_pursue(mrb_state* mrb, mrb_value self);
-mrb_value mruby_guard(mrb_state* mrb, mrb_value self);
-mrb_value mruby_jump(mrb_state* mrb, mrb_value self);
-mrb_value mruby_stay(mrb_state* mrb, mrb_value self);
+mrb_value mruby_puts(mrb_state* mrb, mrb_value self);
+
+mrb_value mruby_pos(mrb_state* mrb, mrb_value self);
+mrb_value mruby_airborne(mrb_state* mrb, mrb_value self);
+mrb_value mruby_grounded(mrb_state* mrb, mrb_value self);
+mrb_value mruby_last_action(mrb_state* mrb, mrb_value self);
+
+static void mrb_dont_free(mrb_state* mrb, void* p) {}
+static const struct mrb_data_type mrb_dont_free_type = { "DontFree", mrb_dont_free };
 
 // Player struct
 struct Player {
@@ -259,10 +263,14 @@ struct Player {
     mrb_sym sym_guard;
     mrb_sym sym_jump;
     mrb_sym sym_stay;
+
     mrb_sym sym_resume;
 
+    // Classes
+    struct RClass *player_class;
+
     // The cell_y value of the ground.
-    const int ground_level = 2;
+    const static int ground_level = 2;
 
     void initialize() {
         current_action  = NONE;
@@ -302,11 +310,16 @@ struct Player {
             exit(332);
         }
 
-        // Next, set up necessary classes/methods
-        mrb_value toplevel = mrb_obj_value(mrb->top_self);
-        DATA_PTR(toplevel) = (void*)this;
+        // Set up mruby classes
+        player_class = mrb_define_class(mrb, "Player", mrb->object_class);
+        MRB_SET_INSTANCE_TT(player_class, MRB_TT_DATA);
 
-        // Set up action symbols
+        // Set up $player
+        mrb_value player_obj = mrb_instance_new(mrb, mrb_obj_value(player_class));
+        mrb_data_init(player_obj, this, &mrb_dont_free_type);
+        mrb_gv_set(mrb, mrb_intern_lit(mrb, "$player"), player_obj);
+
+        // Set up symbols
         sym_go_forward = mrb_intern_lit(mrb, "go_forward");
         sym_go_backward = mrb_intern_lit(mrb, "go_backward");
         sym_pursue = mrb_intern_lit(mrb, "pursue");
@@ -315,17 +328,23 @@ struct Player {
         sym_stay = mrb_intern_lit(mrb, "stay");
         sym_resume = mrb_intern_lit(mrb, "resume");
 
-        // TODO define opponent methods
+        // Set up mruby methods
         mrb_define_method(mrb, mrb->object_class, "act", mruby_act, MRB_ARGS_BLOCK());
+        mrb_define_method(mrb, mrb->object_class, "puts", mruby_puts, MRB_ARGS_REQ(1));
+
+        mrb_define_method(mrb, player_class, "pos", mruby_pos, MRB_ARGS_NONE());
+        mrb_define_method(mrb, player_class, "airborne?", mruby_airborne, MRB_ARGS_NONE());
+        mrb_define_method(mrb, player_class, "grounded?", mruby_grounded, MRB_ARGS_NONE());
+        mrb_define_method(mrb, player_class, "last_action", mruby_last_action, MRB_ARGS_NONE());
 
         // Run the commands script
         load_script("assets/commands.rb", mrb);
     }
 
     void create_new_act_fiber() {
-        printf("NEW FIBER\n");
-        mrb_value toplevel = mrb_obj_value(mrb->object_class);
-        mrb_value fiber_class = mrb_const_get(mrb, toplevel, mrb_intern_lit(mrb, "Fiber"));
+        mrb_value obj_class = mrb_obj_value(mrb->object_class);
+        mrb_value fiber_class = mrb_const_get(mrb, obj_class, mrb_intern_lit(mrb, "Fiber"));
+
         act_fiber = mrb_funcall_with_block(mrb, fiber_class, mrb_intern_lit(mrb, "new"), 0, NULL, act_block);
 
         ruby_check_for_exception(mrb, "Creating 'act' fiber");
@@ -690,17 +709,89 @@ struct Player {
 
 // Ruby method implementations
 mrb_value mruby_act(mrb_state* mrb, mrb_value self) {
-    printf("mruby_act\n");
-    Player *player = (Player *)DATA_PTR(self);
+    mrb_value player_value = mrb_gv_get(mrb, mrb_intern_lit(mrb, "$player"));
+    Player *player = (Player *)DATA_PTR(player_value);
 
-    // Store the block and construct the fiber
-    printf("Pre-mrb_get_args\n");
-    mrb_get_args(mrb, "&", &player->act_block);
+    // Grab the block from params
+    mrb_value block;
+    mrb_get_args(mrb, "&", &block);
+
+    // Bind the block to the 'player' gvar
+    mrb_value top = mrb_obj_value(mrb->top_self);
+    player->act_block = mrb_funcall_with_block(mrb, top, mrb_intern_lit(mrb, "_act_proc"), 0, NULL, block);
+
     player->create_new_act_fiber();
     ruby_check_for_exception(mrb, "mruby_act");
 
     return mrb_nil_value();
 }
+
+mrb_value mruby_puts(mrb_state* mrb, mrb_value self) {
+    mrb_value val;
+    mrb_get_args(mrb, "o", &val);
+
+    if (mrb_respond_to(mrb, val, mrb_intern_lit(mrb, "to_s")))
+        val = mrb_funcall(mrb, val, "to_s", 0);
+
+    const char *cstr = mrb_string_cstr(mrb, val);
+    printf("%s\n", cstr);
+
+    return mrb_nil_value();
+}
+
+mrb_value mruby_pos(mrb_state* mrb, mrb_value self) {
+    mrb_value player_gv = mrb_gv_get(mrb, mrb_intern_lit(mrb, "$player"));
+
+    // We want to "flip" the world if the "perspective_player" is on the right side.
+    Player *perspective_player = (Player *)DATA_PTR(player_gv);
+    Player *target_player = (Player *)DATA_PTR(self);
+
+    printf("PERSP: %i, TARGET: %i\n", perspective_player->side, target_player->side);
+
+    // Range of map (including pit cells) [0, 7]
+    if (perspective_player->side == RIGHT_SIDE)
+        return mrb_fixnum_value(7 - target_player->cell_x);
+    else
+        return mrb_fixnum_value(target_player->cell_x);
+}
+
+mrb_value mruby_airborne(mrb_state* mrb, mrb_value self) {
+    Player *player = (Player *)DATA_PTR(self);
+    return mrb_bool_value(player->cell_y != Player::ground_level);
+}
+
+mrb_value mruby_grounded(mrb_state* mrb, mrb_value self) {
+    Player *player = (Player *)DATA_PTR(self);
+    return mrb_bool_value(player->cell_y == Player::ground_level);
+}
+
+mrb_value mruby_last_action(mrb_state* mrb, mrb_value self) {
+    Player *player = (Player *)DATA_PTR(self);
+
+    switch (player->previous_action) {
+        case UNSPECIFIED: case NONE:
+            return mrb_symbol_value(mrb_intern_lit(mrb, "stay"));
+        case GO_UP:
+            return mrb_symbol_value(mrb_intern_lit(mrb, "jump"));
+        case GO_DOWN:
+            return mrb_symbol_value(mrb_intern_lit(mrb, "guard"));
+        case GO_LEFT:
+            if (player->side == RIGHT_SIDE)
+                return mrb_symbol_value(mrb_intern_lit(mrb, "go_forward"));
+            else
+                return mrb_symbol_value(mrb_intern_lit(mrb, "go_backward"));
+        case GO_RIGHT:
+            if (player->side == RIGHT_SIDE)
+                return mrb_symbol_value(mrb_intern_lit(mrb, "go_backward"));
+            else
+                return mrb_symbol_value(mrb_intern_lit(mrb, "go_forward"));
+        default:
+            printf("HUH??\n");
+            return mrb_nil_value();
+    }
+}
+
+
 
 // ======================================= Player Collision ======================================
 enum CollisionResult { NO_COLLISION = 0, CLASH, KILL };
@@ -924,23 +1015,26 @@ void ruby_ai(Player* player, Player* other_player, void* rawdata) {
     // Only run ruby code when timeout is up
     if (player->action_timeout > 1) return;
 
-    mrb_value action;
-    mrb_value opponent_obj = mrb_nil_value(); // TODO
-    mrb_value alive = mrb_fiber_alive_p(player->mrb, player->act_fiber);
+    mrb_value opponent_obj = mrb_instance_new(player->mrb, mrb_obj_value(player->player_class));
+    mrb_data_init(opponent_obj, other_player, &mrb_dont_free_type);
+    printf("'player' = %i, 'other_player' = %i\n", player->side, other_player->side);
 
-    printf("RUBY AI\n");
+    mrb_value action;
+
+    // If the fiber is not alive, it raised an error... Which means it's probably going to do
+    // so again if we resume it again.
+    mrb_value alive = mrb_fiber_alive_p(player->mrb, player->act_fiber);
+    if (!mrb_true_p(alive)) return;
 
     // Resume the fiber
     action = mrb_funcall_argv(player->mrb, player->act_fiber, player->sym_resume, 1, &opponent_obj);
 
-    // Fiber returns nil when it ends.
-    // If it is nil and no longer alive, we want to renew it.
-    if (mrb_nil_p(action)) {
-        mrb_value alive = mrb_fiber_alive_p(player->mrb, player->act_fiber);
-        if (!mrb_true_p(alive)) {
-            player->create_new_act_fiber();
-            action = mrb_funcall_argv(player->mrb, player->act_fiber, player->sym_resume, 1, &opponent_obj);
-        }
+    // If the fiber is no longer alive, that means it probably didn't issue an action. So we
+    // revive it and run it again.
+    alive = mrb_fiber_alive_p(player->mrb, player->act_fiber);
+    if (!mrb_true_p(alive)) {
+        player->create_new_act_fiber();
+        action = mrb_funcall_argv(player->mrb, player->act_fiber, player->sym_resume, 1, &opponent_obj);
     }
 
     mrb_sym action_sym;
@@ -949,8 +1043,9 @@ void ruby_ai(Player* player, Player* other_player, void* rawdata) {
         action_sym = mrb_symbol(action);
     }
     else {
-        printf("BAD ACTION (not a symbol)\n");
+        printf("BAD ACTION (not a symbol): ");
         if (ruby_check_for_exception(player->mrb, "ruby_ai")) {
+            printf("\n");
             return;
         }
         ruby_p(player->mrb, action, 0);

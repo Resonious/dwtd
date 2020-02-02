@@ -1,6 +1,7 @@
 gems = lambda do |conf|
   conf.gem core: 'mruby-fiber'
   conf.gem core: 'mruby-compiler'
+  conf.gem core: 'mruby-metaprog'
 end
 
 MRuby::Build.new do |conf|

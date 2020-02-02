@@ -4,3 +4,10 @@
   end
 end
 
+def perform!(action)
+  Fiber.yield(action)
+end
+
+def _act_proc(&block)
+  lambda { |*args| $player.instance_exec(*args, &block) }
+end
